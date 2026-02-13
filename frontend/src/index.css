@@ -1,0 +1,238 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* === IMMERSE BRAND COLORS === */
+  
+  /* Primary - Ocean Blue (main brand color) */
+  --primary: #0EA5E9;
+  --primary-dark: #0284C7;
+  --primary-light: #38BDF8;
+  --primary-glow: rgba(14, 165, 233, 0.4);
+  
+  /* Accent - Coral Orange (CTAs, highlights) */
+  --accent: #F97316;
+  --accent-dark: #EA580C;
+  --accent-light: #FB923C;
+  --accent-glow: rgba(249, 115, 22, 0.4);
+  
+  /* Success - Emerald */
+  --success: #10B981;
+  --success-light: #34D399;
+  
+  /* Warning */
+  --warning: #F59E0B;
+  
+  /* Error */
+  --error: #EF4444;
+  
+  /* === BACKGROUNDS === */
+  --bg-primary: #0F172A;      /* Slate 900 - Main bg */
+  --bg-secondary: #1E293B;    /* Slate 800 - Elevated bg */
+  --bg-card: #1E293B;         /* Card backgrounds */
+  --bg-elevated: #334155;     /* Higher elevation */
+  --bg-input: #0F172A;        /* Input backgrounds */
+  
+  /* === TEXT === */
+  --text-primary: #F1F5F9;    /* Slate 100 - Main text */
+  --text-secondary: #94A3B8;  /* Slate 400 - Secondary */
+  --text-muted: #64748B;      /* Slate 500 - Muted */
+  
+  /* === BORDERS === */
+  --border-subtle: #334155;   /* Slate 700 */
+  --border-light: #475569;    /* Slate 600 */
+  --border-focus: var(--primary);
+  
+  /* === GRADIENTS === */
+  --gradient-primary: linear-gradient(135deg, #0EA5E9 0%, #6366F1 100%);
+  --gradient-accent: linear-gradient(135deg, #F97316 0%, #FB923C 100%);
+  --gradient-hero: linear-gradient(135deg, #0EA5E9 0%, #6366F1 50%, #8B5CF6 100%);
+  --gradient-bg: linear-gradient(180deg, #0F172A 0%, #1E293B 50%, #0F172A 100%);
+  --gradient-card: linear-gradient(180deg, rgba(14, 165, 233, 0.05) 0%, rgba(99, 102, 241, 0.02) 100%);
+  
+  /* === SHADOWS === */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.3);
+  --shadow-glow: 0 0 40px var(--primary-glow);
+  --shadow-accent-glow: 0 0 40px var(--accent-glow);
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.2), 0 0 0 1px var(--border-subtle);
+  
+  /* === SPACING === */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  /* Legacy variable mapping for compatibility */
+  --accent-primary: var(--primary);
+  --accent-secondary: var(--accent);
+  --accent-tertiary: var(--primary-light);
+  --accent-success: var(--success);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Animated background - Ocean theme */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: 
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(14, 165, 233, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(99, 102, 241, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 30% at 50% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-elevated);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Focus states */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(14, 165, 233, 0.3);
+  color: var(--text-primary);
+}
+
+/* Button reset */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+/* Input reset */
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes wave {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25% { transform: translateX(-5px) rotate(-2deg); }
+  75% { transform: translateX(5px) rotate(2deg); }
+}
+
+@keyframes gradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+.animate-pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.animate-wave {
+  animation: wave 3s ease-in-out infinite;
+}
+
+/* Utility classes */
+.gradient-text {
+  background: var(--gradient-primary);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-accent {
+  background: var(--gradient-accent);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

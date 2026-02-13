@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.production
+*.env
+*.local
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*~
+
+# Server - generated/temporary files
+server/output/*
+!server/output/.gitkeep
+server/input/*
+!server/input/.gitkeep
+server/temp/*
+!server/temp/.gitkeep
+server/cache/*
+!server/cache/.gitkeep
+server/samples/
+
+# Media files (don't commit large binaries)
+*.mp3
+*.wav
+*.mp4
+*.webm
+*.avi
+*.mov
+*.mkv
+
+# Testing
+coverage/
+.nyc_output/
+*.test.js
+*.tmp
+
+# Deploy tools (downloaded binary)
+cloudflared

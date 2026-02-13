@@ -1,0 +1,17 @@
+services:
+  immersion:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./server/.env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      # Persist generated files across container restarts
+      - ./server/output:/app/output
+      - ./server/cache:/app/cache
+      - ./server/input:/app/input
+      - ./server/temp:/app/temp
+    restart: unless-stopped

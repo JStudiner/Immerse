@@ -1,0 +1,29 @@
+node_modules
+npm-debug.log
+.env
+.git
+.gitignore
+README.md
+.vscode
+.idea
+*.log
+dist
+build
+*.md
+.DS_Store
+
+# Deploy tools
+cloudflared
+deploy.sh
+
+# Exclude large folders
+server/output/*
+server/input/*
+server/temp/*
+server/cache/*
+
+# Keep directory structure
+!server/output/.gitkeep
+!server/input/.gitkeep
+!server/temp/.gitkeep
+!server/cache/.gitkeep

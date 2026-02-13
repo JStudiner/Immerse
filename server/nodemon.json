@@ -1,0 +1,6 @@
+{
+  "watch": ["server.js", "api-v2.js", "src/"],
+  "ignore": ["output/", "temp/", "cache/", "node_modules/"],
+  "ext": "js,json"
+}
+

@@ -1,0 +1,15 @@
+# Ignore output directory - contains large media files that slow down Cursor
+server/output/
+
+# Ignore temp files
+server/temp/
+
+# Node modules
+node_modules/
+
+# Large binary files
+*.mp4
+*.mp3
+*.wav
+*.m4a
+*.webm
