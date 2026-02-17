@@ -309,7 +309,18 @@ function sleep(ms) {
  */
 async function processChunk(chunk, outputDir, options = {}) {
   const { maxRetries = 5, model = "htdemucs", shifts = 1 } = options;
-  const audioBuffer = fs.readFileSync(chunk.path);
+
+  // Compress chunk if WAV or too large for Replicate
+  let uploadPath = chunk.path;
+  const chunkSize = fs.statSync(chunk.path).size;
+  const chunkExt = path.extname(chunk.path).toLowerCase();
+  if (chunkExt === ".wav" || chunkSize > MAX_UPLOAD_SIZE) {
+    const compressedChunkPath = chunk.path.replace(/\.\w+$/, "_compressed.mp3");
+    compressToMp3(chunk.path, compressedChunkPath);
+    uploadPath = compressedChunkPath;
+  }
+
+  const audioBuffer = fs.readFileSync(uploadPath);
 
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -763,8 +774,21 @@ async function splitSpleeter(audioPath, outputDir, options = {}) {
   console.log(`   Estimated cost: ~$0.00025`);
   console.log(`   Expected time: ~2-5 seconds`);
 
-  // Spleeter can handle full audio files directly
-  const audioBuffer = fs.readFileSync(audioPath);
+  // Compress large files before upload (WAV files can be 100MB+ and hit Replicate's 100MB limit)
+  let uploadPath = audioPath;
+  const inputSize = fs.statSync(audioPath).size;
+  const ext = path.extname(audioPath).toLowerCase();
+
+  if (ext === ".wav" || inputSize > MAX_UPLOAD_SIZE) {
+    console.log(`\n   🗜️ Compressing for upload (${(inputSize / 1024 / 1024).toFixed(1)} MB WAV)...`);
+    const compressedPath = path.join(outputDir, "spleeter_upload.mp3");
+    compressToMp3(audioPath, compressedPath);
+    const compressedSize = fs.statSync(compressedPath).size;
+    console.log(`      ${(inputSize / 1024 / 1024).toFixed(1)} MB → ${(compressedSize / 1024 / 1024).toFixed(1)} MB`);
+    uploadPath = compressedPath;
+  }
+
+  const audioBuffer = fs.readFileSync(uploadPath);
 
   console.log(`\n   📤 Uploading to Spleeter...`);
   const output = await replicate.run(SPLEETER_MODEL, {
@@ -839,13 +863,15 @@ async function splitSpleeter(audioPath, outputDir, options = {}) {
 
 /**
  * Main split function - automatically uses parallel for long audio
- * Supports engine selection: "demucs" (default) or "spleeter" (cheap)
+ * Default: Spleeter (fast, cheap, ~$0.00025/run, ~2-10s)
+ * Optional: Demucs (higher quality, ~$0.034/chunk, ~3-5min)
  */
 async function split(audioPath, outputDir, options = {}) {
   const duration = getDuration(audioPath);
 
-  // Check if Spleeter engine requested (cheap/fast option)
-  const engine = options.engine || (options.model === "spleeter" ? "spleeter" : "demucs");
+  // Default to Spleeter (136x cheaper, 15x faster than Demucs)
+  // Use engine: "demucs" for higher quality when needed
+  const engine = options.engine || "spleeter";
   if (engine === "spleeter") {
     return splitSpleeter(audioPath, outputDir, options);
   }

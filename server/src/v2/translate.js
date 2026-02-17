@@ -110,16 +110,16 @@ const TTS_RATES = {
     charsPerSecond: 14.2,  // Lemonfox preset voices (~14 c/s)
     wordsPerSecond: 2.5,
     minSpeed: 0.60,
-    maxSpeed: 1.12,  // Allow 12% over target - TTS atempo handles timing
-                     // Was 0.95 which truncated translations BELOW target, cutting words
+    maxSpeed: 1.25,  // Allow 25% over target - TTS speedup (1.35x max) handles timing
+                     // Complete sentences > perfect duration match
   },
   indonesian: {
     code: "id",
     charsPerSecond: 13.0,   // Lemonfox preset voices
     wordsPerSecond: 2.0,
     minSpeed: 0.60,
-    maxSpeed: 1.10,  // Allow 10% over target - TTS atempo handles timing
-                     // Was 0.90 which aggressively truncated translations
+    maxSpeed: 1.25,  // Allow 25% over target - TTS speedup handles timing
+                     // Complete sentences > perfect duration match
   },
 };
 
@@ -229,11 +229,12 @@ function buildSystemPrompt(level, targetLanguage = "Spanish") {
 
 CRITICAL RULES:
 1. Match targetChars (±15%) - this controls audio duration
-2. Translate DIRECTLY - do NOT add explanations, context, or extra content
-3. If text mentions a game/movie/reference, just translate the name, don't explain what it is
-4. Keep same meaning and tone, just in ${targetLanguage}
-5. Vocabulary: ${guide.vocab}
-6. Style: ${guide.style}
+2. IMPORTANT: ${targetLanguage} uses ~20% more syllables than English. To ensure the dub remains comprehensible, your translation MUST be 15-20% shorter in character count than the English source. Be CONCISE — convey the same meaning in fewer words.
+3. Translate DIRECTLY - do NOT add explanations, context, or extra content
+4. If text mentions a game/movie/reference, just translate the name, don't explain what it is
+5. Keep same meaning and tone, just in ${targetLanguage}
+6. Vocabulary: ${guide.vocab}
+7. Style: ${guide.style}
 
 Return JSON: [{"idx": N, "spanish": "...", "chars": N}, ...]`;
 }
@@ -345,6 +346,7 @@ NARRATION STYLE:
 - Describe what's happening on screen at that moment
 - ${guide.vocab}
 - ${guide.grammar}
+- IMPORTANT: ${langDisplay} uses ~20% more syllables than English. Keep narration CONCISE — 15-20% shorter in character count than the English source to avoid speed-up artifacts.
 - Fill 85-95% of the available time with natural narration
 
 CHARACTER TARGETS:
@@ -759,6 +761,7 @@ YOUR TASK: Create ${targetLanguage} narration for each segment.
 - ${levelInstructions[level] || levelInstructions.B1}
 - Vocabulary: ${guide.vocab}
 - Grammar: ${guide.grammar}
+- IMPORTANT: ${targetLanguage} uses ~20% more syllables than English. Keep translations CONCISE — 15-20% shorter in character count than the English source to ensure natural speech speed.
 ${thirdPersonStyle}
 CHARACTER TARGETS:
 - Aim to match targetChars closely (within ±10%)
@@ -1016,26 +1019,42 @@ async function translate(segments, options = {}) {
             let translatedText = translatedSeg.spanish;
             const originalChars = translatedText.length;
             
-            // FORCE truncate if exceeds maxChars (Gemini often ignores our limit!)
-            if (translatedText.length > targetLength.max) {
-              // Truncate at last complete word before maxChars
-              let truncated = translatedText.substring(0, targetLength.max);
-              const lastSpace = truncated.lastIndexOf(' ');
-              const lastPunctuation = Math.max(
-                truncated.lastIndexOf('.'),
-                truncated.lastIndexOf('!'),
-                truncated.lastIndexOf('?')
-              );
-              
-              // Use punctuation if within last 20%, otherwise use last space
-              if (lastPunctuation > targetLength.max * 0.8) {
-                truncated = truncated.substring(0, lastPunctuation + 1);
-              } else if (lastSpace > targetLength.max * 0.7) {
-                truncated = truncated.substring(0, lastSpace);
+            // Truncate if WAY over max — but always at a sentence boundary
+            // Allow 25% over max before truncating (TTS speed-up handles mild overrun)
+            const hardLimit = Math.round(targetLength.max * 1.25);
+            if (translatedText.length > hardLimit) {
+              // Find the last complete sentence that fits within the hard limit
+              const sentences = translatedText.match(/[^.!?]+[.!?]+/g) || [];
+              if (sentences.length > 1) {
+                let truncated = "";
+                for (const sentence of sentences) {
+                  if ((truncated + sentence).length <= hardLimit) {
+                    truncated += sentence;
+                  } else {
+                    break;
+                  }
+                }
+                // Only use sentence-based truncation if we kept at least 50% of content
+                if (truncated.length > hardLimit * 0.5) {
+                  translatedText = truncated.trim();
+                } else {
+                  // Sentences are too long individually — fall back to clause/word boundary
+                  let fallback = translatedText.substring(0, hardLimit);
+                  const lastPunct = Math.max(
+                    fallback.lastIndexOf('.'), fallback.lastIndexOf('!'),
+                    fallback.lastIndexOf('?'), fallback.lastIndexOf(',')
+                  );
+                  if (lastPunct > hardLimit * 0.6) {
+                    translatedText = fallback.substring(0, lastPunct + 1).trim();
+                  } else {
+                    const lastSpace = fallback.lastIndexOf(' ');
+                    if (lastSpace > hardLimit * 0.5) {
+                      translatedText = fallback.substring(0, lastSpace).trim();
+                    }
+                  }
+                }
+                console.log(`      ⚠️ Seg ${idx}: Truncated ${originalChars} → ${translatedText.length} chars (limit: ${hardLimit}) at sentence boundary`);
               }
-              
-              translatedText = truncated;
-              console.log(`      ⚠️ Seg ${idx}: Truncated ${originalChars} → ${translatedText.length} chars (max: ${targetLength.max})`);
             }
             
             const actualChars = translatedText.length;

@@ -1,4 +1,12 @@
 services:
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:10
+    container_name: cobalt
+    restart: unless-stopped
+    environment:
+      - API_URL=http://cobalt:9000/
+    # No ports exposed — only accessible to immersion via internal network
+
   immersion:
     build: .
     ports:
@@ -8,10 +16,13 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - COBALT_API_URL=http://cobalt:9000/
     volumes:
       # Persist generated files across container restarts
       - ./server/output:/app/output
       - ./server/cache:/app/cache
       - ./server/input:/app/input
       - ./server/temp:/app/temp
+    depends_on:
+      - cobalt
     restart: unless-stopped

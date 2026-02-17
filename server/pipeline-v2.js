@@ -267,7 +267,7 @@ class TimingTracker {
         suggestions.push(
           `⚡ SPLIT takes ${pct.toFixed(
             0
-          )}% - Consider: smaller chunks, more parallel workers, or simpler Demucs model`
+          )}% - Consider: ${step.metadata?.model === "spleeter" ? "this is already using Spleeter (cheapest)" : "try --spleeter for faster/cheaper separation, or smaller chunks"}`
         );
       }
 
@@ -496,6 +496,7 @@ async function runPipeline(source, options = {}) {
     level = "B1",
     voiceType = "male",
     quality = false, // Use higher quality Demucs settings
+    spleeter = false, // Use Spleeter instead of Demucs (fast/cheap, great for dev)
     mode = "synced", // Output mode: synced, learner, extended, or all
     language = "spanish", // Target language: spanish, indonesian
     premium = false, // Use ElevenLabs premium TTS instead of Lemonfox
@@ -629,11 +630,18 @@ async function runPipeline(source, options = {}) {
     tracker.startStep("transcribe");
 
     // Start both in parallel
-    // Separation model can come from: tier override > quality flag > default
+    // Separation engine: spleeter (fast/cheap) or demucs (quality)
+    // Model/shifts only apply to demucs: tier override > quality flag > default
+    const splitEngine = spleeter ? "spleeter" : "demucs";
     const splitModel = separationModel || (quality ? "htdemucs_ft" : "htdemucs");
     const splitShifts = separationShifts !== null ? separationShifts : (quality ? 2 : 1);
     
+    if (spleeter) {
+      console.log(`   🎵 Using Spleeter (fast/cheap — dev mode)`);
+    }
+    
     const splitPromise = split(ingestResult.audioPath, jobDir, {
+      engine: splitEngine,
       model: splitModel,
       shifts: splitShifts,
     });
@@ -673,8 +681,8 @@ async function runPipeline(source, options = {}) {
     // "I am the best botanist [0.8s pause] on this planet" should stay as ONE segment
     // to avoid unnatural gaps in the TTS output
     const isXTTS = cloneMode;
-    const mergeGap = isXTTS ? 1.5 : 0.5;  // XTTS: 1.5s gap merge (flowing sentences), Lemonfox: 0.5s
-    const mergeMaxDur = isXTTS ? 20 : 12;  // XTTS handles longer segments better
+    const mergeGap = isXTTS ? 1.5 : 0.5;  // XTTS: 1.5s (flowing speech), Lemonfox: 0.5s (keep segments tight)
+    const mergeMaxDur = isXTTS ? 20 : 12;  // Max merged segment duration
     const mergedSegments = mergeCloseSegments(transcribeResult.segments, {
       maxGap: mergeGap,
       maxDuration: mergeMaxDur,
@@ -1110,7 +1118,7 @@ async function runPipeline(source, options = {}) {
       ttsResult = await generateTTS(validSegments, jobDir, {
         premium: false,
         voice: finalVoice,
-        concurrency: 40,
+        concurrency: 15,
         durationTolerance: 0.2,
         maxRetries: 1,
         multiSpeaker: true,
@@ -1182,7 +1190,7 @@ async function runPipeline(source, options = {}) {
     // Split total time = its processing time (reported by the module)
     timings.split = splitResult.processingTime || 0;
     tracker.addMetadata("split", "chunks", splitResult.chunks || 1);
-    tracker.addMetadata("split", "model", `${splitModel} (shifts=${splitShifts})`);
+    tracker.addMetadata("split", "model", splitEngine === "spleeter" ? "spleeter" : `${splitModel} (shifts=${splitShifts})`);
     tracker.addMetadata(
       "split",
       "parallel_saved",
@@ -1524,7 +1532,7 @@ async function runPipeline(source, options = {}) {
       .padEnd(6)}s                                 ║
 ║      Split:      ${timings.split
       .toFixed(1)
-      .padEnd(6)}s (Demucs)                        ║
+      .padEnd(6)}s (${spleeter ? "Spleeter" : "Demucs"})                        ║
 ║      Transcribe: ${timings.transcribe
       .toFixed(1)
       .padEnd(6)}s (Whisper)                       ║
@@ -1659,6 +1667,7 @@ const premiumMode = args.includes("--premium") || args.includes("-p");
 const cloneMode = args.includes("--clone") || args.includes("-c");
 const lipsyncMode = args.includes("--lipsync") || args.includes("-l");
 const subsMode = args.includes("--subs") || args.includes("-s");  // Burn subtitles into video
+const spleeterMode = args.includes("--spleeter");  // Use Spleeter instead of Demucs (fast/cheap)
 
 // Parse time clipping flags
 let startTime = null;
@@ -1691,6 +1700,10 @@ if (args.includes("--duration")) {
     clipDuration = parts.length === 2 ? parts[0] * 60 + parts[1] : parts[0] * 3600 + parts[1] * 60 + parts[2];
   } else {
     clipDuration = parseFloat(durValue);
+  }
+  // Guard: 0, NaN, or negative = no clipping (use full video)
+  if (!clipDuration || clipDuration <= 0 || isNaN(clipDuration)) {
+    clipDuration = null;
   }
 }
 
@@ -1861,6 +1874,7 @@ Flags:
   --character-traits DESC 💬 Character personality/traits (optional, for better narration)
   --lipsync               👄 AI lip-sync via Sync Labs (morphs lips to match audio)
   -l                      Shorthand for --lipsync
+  --spleeter              🧪 Use Spleeter for separation (136x cheaper, 15x faster — great for dev)
   --quality               Better audio separation (htdemucs_ft + shifts=2, slower)
   -q                      Shorthand for --quality
   --start TIME            ✂️  Start time for clipping (seconds or MM:SS or HH:MM:SS)
@@ -1926,7 +1940,7 @@ Pipeline steps:
   process.exit(0);
 }
 
-runPipeline(source, { level, voiceType, quality: qualityMode, mode: outputMode, language: targetLanguage, premium: premiumMode, clone: cloneMode, lipsync: lipsyncMode, burnSubs: subsMode, start: startTime, clipDuration, speakerCount, assignedVoices, narratorMode, voiceSource, voiceStartTime, voiceDuration, voiceYoutubeUrl, voiceFilePath })
+runPipeline(source, { level, voiceType, quality: qualityMode, spleeter: spleeterMode, mode: outputMode, language: targetLanguage, premium: premiumMode, clone: cloneMode, lipsync: lipsyncMode, burnSubs: subsMode, start: startTime, clipDuration, speakerCount, assignedVoices, narratorMode, voiceSource, voiceStartTime, voiceDuration, voiceYoutubeUrl, voiceFilePath })
   .then((result) => {
     process.exit(result.success ? 0 : 1);
   })

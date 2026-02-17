@@ -6,6 +6,8 @@
  */
 
 const { execSync } = require("child_process");
+const { pipeline } = require("stream/promises");
+const { Readable } = require("stream");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -209,7 +211,117 @@ function sanitizeFilename(filename) {
 }
 
 /**
- * Download video from URL using yt-dlp (with caching)
+ * Download media using a self-hosted Cobalt instance
+ * Requires COBALT_API_URL env var (e.g. "http://cobalt:9000/" in Docker)
+ * Supports: YouTube, TikTok, Twitter/X, Instagram, Reddit, and more
+ *
+ * @param {string} url - Video/audio URL
+ * @param {string} outputPath - Path to save the downloaded file
+ * @param {object} options - Cobalt options
+ * @param {string} options.downloadMode - "auto", "audio", or "mute" (default: "auto")
+ * @param {string} options.videoQuality - "max","2160","1440","1080","720","480","360" (default: "1080")
+ * @returns {Promise<boolean>} True if download succeeded, false if skipped or failed
+ */
+async function downloadWithCobalt(url, outputPath, options = {}) {
+  const cobaltUrl = process.env.COBALT_API_URL;
+  if (!cobaltUrl) {
+    // Cobalt not configured — skip silently
+    return false;
+  }
+
+  const { downloadMode = "auto", videoQuality = "1080" } = options;
+  const apiEndpoint = cobaltUrl.replace(/\/$/, "") + "/";
+
+  console.log(`   🔷 Trying Cobalt (${apiEndpoint})...`);
+
+  try {
+    // Build request headers
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    // Optional API key auth for protected instances
+    const apiKey = process.env.COBALT_API_KEY;
+    if (apiKey) {
+      headers["Authorization"] = `Api-Key ${apiKey}`;
+    }
+
+    // Step 1: Request download URL from Cobalt
+    const response = await fetch(apiEndpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        url,
+        videoQuality,
+        audioFormat: "best",
+        filenameStyle: "classic",
+        downloadMode,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Cobalt returned HTTP ${response.status}: ${text.substring(0, 200)}`);
+    }
+
+    const data = await response.json();
+
+    // Handle Cobalt response statuses
+    let downloadUrl;
+    if (data.status === "redirect" || data.status === "tunnel") {
+      downloadUrl = data.url;
+    } else if (data.status === "picker" && data.picker?.length > 0) {
+      // Multiple options — pick the first (best) one
+      downloadUrl = data.picker[0].url;
+    } else if (data.status === "error") {
+      throw new Error(
+        `Cobalt error: ${data.error?.code || JSON.stringify(data).substring(0, 200)}`
+      );
+    } else {
+      throw new Error(`Unexpected Cobalt status: ${data.status}`);
+    }
+
+    if (!downloadUrl) {
+      throw new Error("No download URL in Cobalt response");
+    }
+
+    console.log(`   🔷 Got Cobalt URL, downloading file...`);
+
+    // Step 2: Stream the media file to disk (Cobalt tunnels are streamed responses)
+    const fileResponse = await fetch(downloadUrl);
+    if (!fileResponse.ok) {
+      throw new Error(`File download failed: HTTP ${fileResponse.status}`);
+    }
+
+    if (!fileResponse.body) {
+      throw new Error("No response body from Cobalt download URL");
+    }
+
+    const fileStream = fs.createWriteStream(outputPath);
+    await pipeline(Readable.fromWeb(fileResponse.body), fileStream);
+
+    const size = fs.statSync(outputPath).size;
+    if (size < 10 * 1024) {
+      throw new Error(`Downloaded file too small (${size} bytes), likely invalid`);
+    }
+
+    console.log(`   🔷 Cobalt download complete (${(size / 1024 / 1024).toFixed(1)} MB)`);
+    return true;
+  } catch (error) {
+    console.log(`   ⚠️ Cobalt failed: ${error.message}`);
+    // Clean up any partial/bad download
+    if (fs.existsSync(outputPath)) {
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {}
+    }
+    return false;
+  }
+}
+
+/**
+ * Download video from URL (Cobalt API → yt-dlp fallback, with caching)
  * @param {string} url - Video URL
  * @param {string} outputDir - Output directory
  * @param {string} sourceType - Source type (youtube, tiktok, etc.)
@@ -239,25 +351,35 @@ async function downloadVideo(url, outputDir, sourceType = "url") {
   console.log(`   📥 Downloading video...`);
   const startTime = Date.now();
 
-  try {
-    await youtubedl(url, {
-      format:
-        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-      mergeOutputFormat: "mp4",
-      output: videoPath,
-      noCheckCertificates: true,
-      noWarnings: true,
-      extractorArgs: "youtube:player_client=android",
-    });
-  } catch (error) {
-    // Fallback: simpler format (use android client to avoid JS runtime requirement)
-    console.log(`   ⚠️ Retrying with simpler format...`);
-    await youtubedl(url, {
-      format: "best",
-      output: videoPath,
-      noCheckCertificates: true,
-      extractorArgs: "youtube:player_client=android",
-    });
+  // Try Cobalt API first (fast, no auth, no system dependencies)
+  const cobaltOk = await downloadWithCobalt(url, videoPath, {
+    downloadMode: "auto",
+    videoQuality: "1080",
+  });
+
+  if (!cobaltOk) {
+    // Fallback: yt-dlp
+    console.log(`   📥 Falling back to yt-dlp...`);
+    try {
+      await youtubedl(url, {
+        format:
+          "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        mergeOutputFormat: "mp4",
+        output: videoPath,
+        noCheckCertificates: true,
+        noWarnings: true,
+        extractorArgs: "youtube:player_client=android",
+      });
+    } catch (error) {
+      // Last resort: simplest yt-dlp format
+      console.log(`   ⚠️ Retrying with simpler format...`);
+      await youtubedl(url, {
+        format: "best",
+        output: videoPath,
+        noCheckCertificates: true,
+        extractorArgs: "youtube:player_client=android",
+      });
+    }
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -310,7 +432,7 @@ function extractAudio(videoPath, outputDir, options = {}) {
   if (start !== undefined && start !== null) {
     console.log(`      Start: ${start}s`);
   }
-  if (duration !== undefined && duration !== null) {
+  if (duration && duration > 0) {
     console.log(`      Duration: ${duration}s`);
   }
   
@@ -326,8 +448,8 @@ function extractAudio(videoPath, outputDir, options = {}) {
   
   ffmpegCmd += ` -i "${videoPath}"`;
   
-  // Add duration if specified
-  if (duration !== undefined && duration !== null) {
+  // Add duration if specified (0 or falsy = full video, no clipping)
+  if (duration && duration > 0) {
     ffmpegCmd += ` -t ${duration}`;
   }
   
@@ -375,12 +497,12 @@ async function ingest(source, outputDir, options = {}) {
   if (sourceId) console.log(`   ID: ${sourceId}`);
 
   // Show clip info if trimming
-  if ((start !== undefined && start !== null) || (duration !== undefined && duration !== null)) {
+  if (start || (duration && duration > 0)) {
     console.log(`   ✂️  Clipping:`);
-    if (start !== undefined && start !== null) {
+    if (start) {
       console.log(`      Start: ${start}s (${(start / 60).toFixed(1)} min)`);
     }
-    if (duration !== undefined && duration !== null) {
+    if (duration && duration > 0) {
       console.log(`      Duration: ${duration}s (${(duration / 60).toFixed(1)} min)`);
     }
   }
@@ -465,6 +587,7 @@ module.exports = {
   extractAudio,
   getCachedVideo,
   getCacheKey,
+  downloadWithCobalt,
   sanitizeFilename,
   CACHE_DIR,
 };

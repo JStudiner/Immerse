@@ -4,8 +4,8 @@
  * Merges aligned TTS segments with background audio
  * Uses a streaming approach - no temp files, single FFmpeg pass
  * 
- * Strategy: Build one complex filter that delays each segment
- * and mixes everything in a single FFmpeg command
+ * Strategy: Single-pass filter_complex with anullsrc silent anchor
+ * Each segment uses adelay (no apad!) — ~10x faster than batched approach
  */
 
 const fs = require("fs");
@@ -63,9 +63,35 @@ async function merge(backgroundPath, segments, outputPath, options = {}) {
   }
 
   // Filter segments: must have aligned TTS file (either XTTS, Lemonfox, or fallback)
-  const validSegments = segments.filter(s => 
-    s.alignedFile && fs.existsSync(s.alignedFile) && s.start !== undefined
-  ).sort((a, b) => a.start - b.start);
+  // Also validate each file is a real audio file (not corrupt/truncated)
+  let corruptCount = 0;
+  const validSegments = segments.filter(s => {
+    if (!s.alignedFile || !fs.existsSync(s.alignedFile) || s.start === undefined) return false;
+    // Check file size — anything under 2KB is almost certainly corrupt
+    try {
+      const stat = fs.statSync(s.alignedFile);
+      if (stat.size < 2048) {
+        corruptCount++;
+        console.log(`      ⚠️ Skipping seg ${s.index}: corrupt file (${stat.size} bytes)`);
+        return false;
+      }
+      // Quick ffprobe validation — can FFmpeg actually read this file?
+      const dur = getAudioDuration(s.alignedFile);
+      if (!dur || dur <= 0) {
+        corruptCount++;
+        console.log(`      ⚠️ Skipping seg ${s.index}: unreadable by FFmpeg`);
+        return false;
+      }
+    } catch {
+      corruptCount++;
+      return false;
+    }
+    return true;
+  }).sort((a, b) => a.start - b.start);
+  
+  if (corruptCount > 0) {
+    console.log(`   ⚠️ Skipped ${corruptCount} corrupt/unreadable TTS files`);
+  }
   
   // Count segments that used fallback TTS
   const fallbackCount = validSegments.filter(s => s.usedFallback).length;
@@ -118,9 +144,16 @@ async function merge(backgroundPath, segments, outputPath, options = {}) {
 
   // ALL segments included
   const includedSegments = processedSegments;
+
+  if (includedSegments.length === 0) {
+    throw new Error(
+      `No valid TTS segments to merge (${segments.length} total, ${corruptCount} corrupt). ` +
+      `This may happen if the TTS API was overwhelmed by concurrent requests.`
+    );
+  }
   
   console.log(`   Background: ${hasBackground ? path.basename(backgroundPath) : "(none)"}`);
-  console.log(`   TTS segments: ${includedSegments.length} (ALL included)`);
+  console.log(`   TTS segments: ${includedSegments.length}${corruptCount > 0 ? ` (${corruptCount} skipped as corrupt)` : " (ALL included)"}`);
   
   if (truncatedCount > 0) {
     console.log(`   ✂️ Truncated ${truncatedCount} overrunning segments to prevent overlap`);
@@ -136,125 +169,176 @@ async function merge(backgroundPath, segments, outputPath, options = {}) {
   const tempDir = path.dirname(outputPath);
 
   // ═══════════════════════════════════════════════════════════════
-  // STRATEGY: Batch adelay + amix (no temp padded files!)
-  // Only process included segments (skipped ones are excluded)
+  // STRATEGY: Single-pass filter_complex with silent anchor track
+  // Uses anullsrc as duration reference — eliminates apad overhead!
+  // Old approach: apad every segment to full duration → 200×30min = 100hr of audio
+  // New approach: anullsrc anchor + adelay only → 30min + 200×5s = ~47min of audio
+  // Result: ~10x less data for FFmpeg to process
   // ═══════════════════════════════════════════════════════════════
-  
-  const totalBatches = Math.ceil(includedSegments.length / batchSize);
-  console.log(`\n   🎵 Processing ${totalBatches} batches...`);
-  
-  const batchOutputs = [];
-  
-  for (let b = 0; b < includedSegments.length; b += batchSize) {
-    const batch = includedSegments.slice(b, b + batchSize);
-    const batchIdx = Math.floor(b / batchSize);
-    const batchPath = path.join(tempDir, `batch_${batchIdx.toString().padStart(3, "0")}.mp3`);
-    
-    process.stdout.write(`\r   📦 Batch ${batchIdx + 1}/${totalBatches} (${batch.length} segments)...`);
-    
-    // Build FFmpeg command with adelay for each segment
-    const inputs = batch.map(s => `-i "${s.alignedFile}"`).join(" ");
-    
-    // Each segment: volume → truncate if needed → fade-in → fade-out → delay → pad
-    // Overrunning segments are trimmed to prevent bleed into next segment
-    const filters = batch.map((s, i) => {
-      const delayMs = Math.round(s.start * 1000);
-      const rawDuration = s.alignedDuration || s.ttsDuration || s.duration || 3;
-      const effectiveDuration = s.maxDuration || rawDuration;
-      
-      // Volume + natural fade-in (40ms soft attack)
-      let filterChain = `[${i}]volume=${ttsVolume}`;
-      
-      // Truncate overrunning segments: hard trim + 150ms fade-out at cut point
-      if (s.wasTruncated && effectiveDuration < rawDuration) {
-        filterChain += `,atrim=end=${effectiveDuration.toFixed(3)}`;
-        const trimFadeStart = Math.max(0, effectiveDuration - 0.15);
-        filterChain += `,afade=t=out:st=${trimFadeStart.toFixed(3)}:d=0.15`;
-        filterChain += `,afade=t=in:d=${fadeInDuration}`;
-      } else {
-        filterChain += `,afade=t=in:d=${fadeInDuration}`;
-        // Natural fade-out at the end (60ms)
-        const fadeOutStart = Math.max(0, effectiveDuration - fadeOutDuration);
-        filterChain += `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration}`;
-      }
-      
-      filterChain += `,adelay=${delayMs}|${delayMs},apad=whole_dur=${totalDuration}[s${i}]`;
-      
-      return filterChain;
-    }).join(";");
-    
-    // Mix all delayed segments
-    const mixInputs = batch.map((_, i) => `[s${i}]`).join("");
-    const mixFilter = `${mixInputs}amix=inputs=${batch.length}:duration=longest:normalize=0[out]`;
-    
-    const filterComplex = `${filters};${mixFilter}`;
-    
-    try {
-      execSync(
-        `ffmpeg -y -threads 0 ${inputs} -filter_complex "${filterComplex}" -map "[out]" -ar 44100 -ac 2 -b:a 192k -t ${totalDuration} "${batchPath}"`,
-        { encoding: "utf-8", timeout: 180000, maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
-      );
-      batchOutputs.push(batchPath);
-    } catch (e) {
-      console.log(`\n      ⚠️ Batch ${batchIdx} failed: ${e.message.substring(0, 100)}`);
-      console.log(`      Trying smaller chunks...`);
-      
-      // Fallback: process this batch in smaller pieces
-      const smallerBatchOutputs = await processSmallBatch(batch, tempDir, totalDuration, ttsVolume, batchIdx);
-      batchOutputs.push(...smallerBatchOutputs);
-    }
-  }
-  
-  console.log("");
 
-  // ═══════════════════════════════════════════════════════════════
-  // Merge all batches together using sequential amix
-  // ═══════════════════════════════════════════════════════════════
-  console.log(`\n   🔀 Merging ${batchOutputs.length} batch outputs...`);
-  
-  let ttsComboPath = batchOutputs[0];
-  
-  if (batchOutputs.length > 1) {
-    ttsComboPath = path.join(tempDir, "tts_combined.mp3");
-    
-    // Sequential merge: combine batches one at a time
-    let currentMix = batchOutputs[0];
-    
-    for (let i = 1; i < batchOutputs.length; i++) {
-      const nextBatch = batchOutputs[i];
-      const outPath = path.join(tempDir, `merge_step_${i}.mp3`);
+  console.log(`\n   🎵 Single-pass merge (${includedSegments.length} segments)...`);
+
+  const filterScriptPath = path.join(tempDir, "merge_filter.txt");
+  let ttsComboPath = path.join(tempDir, "tts_combined.mp3");
+
+  // Build filter_complex_script — written to file to avoid command-line length limits
+  const filterLines = [];
+
+  // Input 0: silent anchor track (defines output duration — no per-segment apad needed!)
+  filterLines.push(`[0]atrim=duration=${totalDuration.toFixed(3)}[base]`);
+
+  // Each segment: volume → truncate (if needed) → fades → adelay (NO apad!)
+  for (let i = 0; i < includedSegments.length; i++) {
+    const seg = includedSegments[i];
+    const inputIdx = i + 1; // +1 because input 0 is anullsrc
+    const delayMs = Math.round(seg.start * 1000);
+    const rawDuration = seg.alignedDuration || seg.ttsDuration || seg.duration || 3;
+    const effectiveDuration = seg.maxDuration || rawDuration;
+
+    let chain = `[${inputIdx}]volume=${ttsVolume}`;
+
+    // Overrunning segments: speed up to fit (never hard-clip mid-word)
+    if (seg.wasTruncated && effectiveDuration < rawDuration) {
+      const speedRatio = rawDuration / effectiveDuration; // e.g. 1.3 = need 30% speedup
+      const MAX_MERGE_SPEEDUP = 1.8; // Cap at 1.8x — beyond this, hard-clip as last resort
       
-      process.stdout.write(`\r   🔀 Merging batch ${i + 1}/${batchOutputs.length}...`);
-      
+      if (speedRatio <= MAX_MERGE_SPEEDUP) {
+        // Speed up so words finish naturally — atempo range per filter is 0.5-2.0
+        let remaining = speedRatio;
+        while (remaining > 2.0) {
+          chain += `,atempo=2.0`;
+          remaining /= 2.0;
+        }
+        chain += `,atempo=${remaining.toFixed(4)}`;
+      } else {
+        // Extreme overrun (>1.8x) — speed up to max, then trim the tail with fade
+        chain += `,atempo=${MAX_MERGE_SPEEDUP.toFixed(1)}`;
+        const sped = rawDuration / MAX_MERGE_SPEEDUP;
+        if (sped > effectiveDuration) {
+          chain += `,atrim=end=${effectiveDuration.toFixed(3)}`;
+          const trimFadeStart = Math.max(0, effectiveDuration - 0.20);
+          chain += `,afade=t=out:st=${trimFadeStart.toFixed(3)}:d=0.20`;
+        }
+      }
+      chain += `,afade=t=in:d=${fadeInDuration}`;
+      const fadeOutStart = Math.max(0, effectiveDuration - fadeOutDuration);
+      chain += `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration}`;
+    } else {
+      chain += `,afade=t=in:d=${fadeInDuration}`;
+      // Natural fade-out at the end (60ms)
+      const fadeOutStart = Math.max(0, effectiveDuration - fadeOutDuration);
+      chain += `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutDuration}`;
+    }
+
+    // adelay positions the segment — anullsrc anchor handles total duration
+    chain += `,adelay=${delayMs}|${delayMs}[s${i}]`;
+    filterLines.push(chain);
+  }
+
+  // Final amix: silent anchor + all segments → single output
+  // duration=first: run for the duration of input 0 (the anullsrc anchor)
+  // dropout_transition=0: no volume ramp when inputs end
+  // normalize=0: raw sum (no division by active input count)
+  const streamLabels = ["[base]"].concat(includedSegments.map((_, i) => `[s${i}]`));
+  filterLines.push(`${streamLabels.join("")}amix=inputs=${includedSegments.length + 1}:duration=first:dropout_transition=0:normalize=0[out]`);
+
+  // Write filter script to temp file (handles 200+ segment filter chains cleanly)
+  fs.writeFileSync(filterScriptPath, filterLines.join(";\n"));
+
+  // Build input list: anullsrc (silent anchor) + all TTS segment files
+  const inputArgs = ['-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100"'];
+  for (const seg of includedSegments) {
+    inputArgs.push(`-i "${seg.alignedFile}"`);
+  }
+
+  try {
+    console.log(`   ⚡ Running single-pass FFmpeg (${includedSegments.length + 1} inputs)...`);
+    execSync(
+      `ffmpeg -y -threads 0 ${inputArgs.join(" ")} -filter_complex_script "${filterScriptPath}" -map "[out]" -ar 44100 -ac 2 -b:a 192k -t ${totalDuration} "${ttsComboPath}"`,
+      { encoding: "utf-8", timeout: 300000, maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
+    );
+    console.log(`   ✅ Single-pass merge complete`);
+  } catch (e) {
+    console.log(`\n   ⚠️ Single-pass merge failed: ${e.message.substring(0, 200)}`);
+    console.log(`   🔄 Falling back to batched merge (still without apad)...`);
+
+    // Fallback: same anullsrc approach but in smaller batches
+    const batchOutputs = [];
+    const fallbackBatchSize = 50;
+    const totalBatches = Math.ceil(includedSegments.length / fallbackBatchSize);
+
+    for (let b = 0; b < includedSegments.length; b += fallbackBatchSize) {
+      const batch = includedSegments.slice(b, b + fallbackBatchSize);
+      const batchIdx = Math.floor(b / fallbackBatchSize);
+      const batchPath = path.join(tempDir, `batch_${batchIdx.toString().padStart(3, "0")}.mp3`);
+
+      process.stdout.write(`\r   📦 Batch ${batchIdx + 1}/${totalBatches} (${batch.length} segments)...`);
+
+      // Build per-batch filter with anullsrc anchor (same approach, fewer inputs)
+      const batchFilterLines = [];
+      batchFilterLines.push(`[0]atrim=duration=${totalDuration.toFixed(3)}[base]`);
+
+      for (let i = 0; i < batch.length; i++) {
+        const seg = batch[i];
+        const delayMs = Math.round(seg.start * 1000);
+        const rawDur = seg.alignedDuration || seg.ttsDuration || seg.duration || 3;
+        const effectiveDur = seg.maxDuration || rawDur;
+        let chain = `[${i + 1}]volume=${ttsVolume}`;
+        if (seg.wasTruncated && effectiveDur < rawDur) {
+          chain += `,atrim=end=${effectiveDur.toFixed(3)}`;
+          chain += `,afade=t=out:st=${Math.max(0, effectiveDur - 0.15).toFixed(3)}:d=0.15`;
+          chain += `,afade=t=in:d=${fadeInDuration}`;
+        } else {
+          chain += `,afade=t=in:d=${fadeInDuration}`;
+          chain += `,afade=t=out:st=${Math.max(0, effectiveDur - fadeOutDuration).toFixed(3)}:d=${fadeOutDuration}`;
+        }
+        chain += `,adelay=${delayMs}|${delayMs}[s${i}]`;
+        batchFilterLines.push(chain);
+      }
+
+      const batchLabels = ["[base]"].concat(batch.map((_, i) => `[s${i}]`));
+      batchFilterLines.push(`${batchLabels.join("")}amix=inputs=${batch.length + 1}:duration=first:dropout_transition=0:normalize=0[out]`);
+
+      const batchFilterPath = path.join(tempDir, `batch_filter_${batchIdx}.txt`);
+      fs.writeFileSync(batchFilterPath, batchFilterLines.join(";\n"));
+
+      const batchInputArgs = ['-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100"'];
+      for (const seg of batch) {
+        batchInputArgs.push(`-i "${seg.alignedFile}"`);
+      }
+
       try {
         execSync(
-          `ffmpeg -y -threads 0 -i "${currentMix}" -i "${nextBatch}" -filter_complex "[0][1]amix=inputs=2:duration=longest:normalize=0[out]" -map "[out]" -ar 44100 -ac 2 -b:a 192k "${outPath}"`,
-          { encoding: "utf-8", timeout: 180000, stdio: ["pipe", "pipe", "pipe"] }
+          `ffmpeg -y -threads 0 ${batchInputArgs.join(" ")} -filter_complex_script "${batchFilterPath}" -map "[out]" -ar 44100 -ac 2 -b:a 192k -t ${totalDuration} "${batchPath}"`,
+          { encoding: "utf-8", timeout: 180000, maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
         );
-        
-        // Cleanup previous merge file (but keep original batch files for now)
-        if (i > 1) {
-          try { fs.unlinkSync(currentMix); } catch {}
-        }
-        
-        currentMix = outPath;
-      } catch (e) {
-        console.log(`\n      ⚠️ Merge step ${i} failed: ${e.message}`);
-        // Try to continue with what we have
-        break;
+        batchOutputs.push(batchPath);
+      } catch (batchErr) {
+        console.log(`\n      ⚠️ Batch ${batchIdx} failed: ${batchErr.message.substring(0, 100)}`);
       }
+      try { fs.unlinkSync(batchFilterPath); } catch {}
     }
-    
-    // Move final result to combo path
-    if (currentMix !== ttsComboPath && fs.existsSync(currentMix)) {
-      fs.renameSync(currentMix, ttsComboPath);
-    }
-    
-    // Cleanup batch files
-    batchOutputs.forEach(f => { try { fs.unlinkSync(f); } catch {} });
-    
+
     console.log("");
+
+    // Merge batch outputs (each is already full-duration thanks to anullsrc)
+    if (batchOutputs.length === 1) {
+      fs.renameSync(batchOutputs[0], ttsComboPath);
+    } else if (batchOutputs.length > 1) {
+      const batchInputs = batchOutputs.map(f => `-i "${f}"`).join(" ");
+      const batchStreamRefs = batchOutputs.map((_, i) => `[${i}]`).join("");
+      execSync(
+        `ffmpeg -y -threads 0 ${batchInputs} -filter_complex "${batchStreamRefs}amix=inputs=${batchOutputs.length}:duration=longest:normalize=0[out]" -map "[out]" -ar 44100 -ac 2 -b:a 192k "${ttsComboPath}"`,
+        { encoding: "utf-8", timeout: 300000, stdio: ["pipe", "pipe", "pipe"] }
+      );
+      batchOutputs.forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    } else {
+      throw new Error("All merge batches failed - no TTS audio could be created");
+    }
   }
+
+  // Cleanup filter script
+  try { fs.unlinkSync(filterScriptPath); } catch {}
 
   // ═══════════════════════════════════════════════════════════════
   // Final mix: background + combined TTS
@@ -369,6 +453,7 @@ async function merge(backgroundPath, segments, outputPath, options = {}) {
 
 /**
  * Process a small batch when the main batch fails
+ * Uses anullsrc anchor instead of apad for efficiency
  */
 async function processSmallBatch(segments, tempDir, totalDuration, ttsVolume, parentBatchIdx) {
   const smallBatchSize = 10;
@@ -380,13 +465,18 @@ async function processSmallBatch(segments, tempDir, totalDuration, ttsVolume, pa
     const batch = segments.slice(i, i + smallBatchSize);
     const outPath = path.join(tempDir, `small_batch_${parentBatchIdx}_${Math.floor(i/smallBatchSize)}.mp3`);
     
-    const inputs = batch.map(s => `-i "${s.alignedFile}"`).join(" ");
-    const filters = batch.map((s, j) => {
+    // Use anullsrc anchor instead of apad on every segment
+    const inputs = ['-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100"']
+      .concat(batch.map(s => `-i "${s.alignedFile}"`)).join(" ");
+    
+    const filterLines = [`[0]atrim=duration=${totalDuration.toFixed(3)}[base]`];
+    
+    batch.forEach((s, j) => {
       const delayMs = Math.round(s.start * 1000);
       const rawDuration = s.alignedDuration || s.ttsDuration || s.duration || 3;
       const effectiveDuration = s.maxDuration || rawDuration;
       
-      let chain = `[${j}]volume=${ttsVolume}`;
+      let chain = `[${j + 1}]volume=${ttsVolume}`;
       if (s.wasTruncated && effectiveDuration < rawDuration) {
         chain += `,atrim=end=${effectiveDuration.toFixed(3)}`;
         const trimFadeStart = Math.max(0, effectiveDuration - 0.15);
@@ -397,16 +487,18 @@ async function processSmallBatch(segments, tempDir, totalDuration, ttsVolume, pa
         const fadeOutStart = Math.max(0, effectiveDuration - fadeOut);
         chain += `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOut}`;
       }
-      chain += `,adelay=${delayMs}|${delayMs},apad=whole_dur=${totalDuration}[s${j}]`;
-      return chain;
-    }).join(";");
-    const mixInputs = batch.map((_, j) => `[s${j}]`).join("");
-    const filterComplex = `${filters};${mixInputs}amix=inputs=${batch.length}:duration=longest:normalize=0[out]`;
+      chain += `,adelay=${delayMs}|${delayMs}[s${j}]`;
+      filterLines.push(chain);
+    });
+    
+    const streamLabels = ["[base]"].concat(batch.map((_, j) => `[s${j}]`));
+    filterLines.push(`${streamLabels.join("")}amix=inputs=${batch.length + 1}:duration=first:dropout_transition=0:normalize=0[out]`);
+    const filterComplex = filterLines.join(";");
     
     try {
       execSync(
-        `ffmpeg -y ${inputs} -filter_complex "${filterComplex}" -map "[out]" -ar 44100 -ac 2 -b:a 192k -t ${totalDuration} "${outPath}"`,
-        { encoding: "utf-8", timeout: 120000, stdio: ["pipe", "pipe", "pipe"] }
+        `ffmpeg -y -threads 0 ${inputs} -filter_complex "${filterComplex}" -map "[out]" -ar 44100 -ac 2 -b:a 192k -t ${totalDuration} "${outPath}"`,
+        { encoding: "utf-8", timeout: 120000, maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
       );
       outputs.push(outPath);
     } catch (e) {

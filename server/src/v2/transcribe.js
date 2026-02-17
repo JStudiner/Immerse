@@ -448,6 +448,7 @@ function mergeCloseSegments(segments, options = {}) {
   const {
     maxGap = 0.5,           // Merge if gap < 0.5s
     maxDuration = 15,       // Don't create segments longer than 15s
+    maxMergeCount = 5,      // Don't merge more than 5 segments into one (prevents mega-blocks)
     sameSpeakerOnly = true, // Only merge same speaker
   } = options;
 
@@ -455,15 +456,17 @@ function mergeCloseSegments(segments, options = {}) {
 
   const merged = [];
   let current = { ...segments[0] };
+  let mergeCount = 1; // Track how many original segments are in current block
 
   for (let i = 1; i < segments.length; i++) {
     const next = segments[i];
     const gap = next.start - current.end;
     const wouldBeTooLong = (next.end - current.start) > maxDuration;
+    const wouldMergeTooMany = mergeCount >= maxMergeCount;
     const differentSpeaker = sameSpeakerOnly && next.speaker !== current.speaker;
 
     // Merge if gap is small enough and constraints are met
-    if (gap <= maxGap && !wouldBeTooLong && !differentSpeaker) {
+    if (gap <= maxGap && !wouldBeTooLong && !wouldMergeTooMany && !differentSpeaker) {
       // Merge: extend current segment
       current.text = current.text + " " + next.text;
       current.end = next.end;
@@ -471,10 +474,12 @@ function mergeCloseSegments(segments, options = {}) {
       if (next.words && current.words) {
         current.words = [...current.words, ...next.words];
       }
+      mergeCount++;
     } else {
-      // Gap too big or would be too long - start new segment
+      // Gap too big, too long, too many merged, or different speaker - start new segment
       merged.push(current);
       current = { ...next };
+      mergeCount = 1;
     }
   }
 
@@ -484,7 +489,7 @@ function mergeCloseSegments(segments, options = {}) {
   // Re-index and log stats
   const result = merged.map((seg, i) => ({ ...seg, index: i }));
   
-  console.log(`   📎 Merged ${segments.length} → ${result.length} segments (gap ≤ ${maxGap}s)`);
+  console.log(`   📎 Merged ${segments.length} → ${result.length} segments (gap ≤ ${maxGap}s, max ${maxMergeCount} per block)`);
   
   return result;
 }

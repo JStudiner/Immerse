@@ -157,8 +157,8 @@ Return ONLY the shortened Spanish (max ${maxChars} chars):`;
  * @returns {Promise<object>} Result with adjusted file path and duration
  */
 async function postProcessSpeedAdjust(inputPath, outputPath, targetDuration, currentDuration) {
-  const MAX_SPEEDUP = 1.35; // Max 35% speedup for synced mode (more conservative)
-  const MAX_SLOWDOWN = 0.85; // Max 15% slowdown
+  const MAX_SPEEDUP = 1.35; // Max 35% speedup for synced mode
+  const MIN_STRETCH = 0.80; // Max stretch: ~1.25x slower — mild slowdown only, never sounds draggy
   
   if (!currentDuration || currentDuration <= 0) {
     return { path: inputPath, duration: currentDuration, adjusted: false };
@@ -166,58 +166,57 @@ async function postProcessSpeedAdjust(inputPath, outputPath, targetDuration, cur
   
   const ratio = currentDuration / targetDuration;
   
-  // If within 10% tolerance, don't adjust
-  if (ratio >= 0.9 && ratio <= 1.1) {
+  // If within 5% tolerance, don't adjust
+  if (ratio >= 0.95 && ratio <= 1.05) {
     return { path: inputPath, duration: currentDuration, adjusted: false };
   }
   
-  // ── TOO SHORT: pad with silence to fill the slot ──
-  // Apply mild slowdown first, then center-pad with silence
-  if (ratio < 0.9) {
+  // ── TOO SHORT: mild stretch to partially fill the slot ──
+  // Only do a gentle slowdown (down to 0.8x atempo = 1.25x slower).
+  // If the gap is bigger than that, leave it — a brief silence is better
+  // than unnaturally slow speech, especially at higher CEFR levels.
+  if (ratio < 0.95) {
+    // If ratio is already above MIN_STRETCH, stretch to fill.
+    // If below, only stretch to MIN_STRETCH (leave remaining gap as silence).
+    if (ratio >= MIN_STRETCH) {
+      // Mild stretch — will sound natural
+    } else {
+      // Gap too large for stretching alone — skip the stretch entirely,
+      // just return the audio as-is (natural speed with a silence gap)
+      return { path: inputPath, duration: currentDuration, adjusted: false };
+    }
+    
     try {
-      // Step 1: Apply mild slowdown if significantly short
-      let audioPath = inputPath;
-      let audioDuration = currentDuration;
+      // Calculate atempo factor needed to stretch toward target duration
+      // atempo < 1.0 = slower playback = stretches audio
+      let atempo = Math.max(MIN_STRETCH, ratio);
       
-      if (ratio < MAX_SLOWDOWN) {
-        const slowedPath = outputPath.replace(/\.mp3$/, "_slowed.mp3");
-        const atempo = MAX_SLOWDOWN;
-        execSync(
-          `ffmpeg -y -i "${inputPath}" -filter:a "atempo=${atempo.toFixed(4)}" "${slowedPath}" 2>/dev/null`,
-          { encoding: "utf-8", timeout: 30000 }
-        );
-        if (fs.existsSync(slowedPath)) {
-          audioPath = slowedPath;
-          audioDuration = getAudioDuration(slowedPath) || (currentDuration / atempo);
-        }
+      // Build atempo filter chain (atempo range per filter: 0.5 - 2.0)
+      let atempoFilters = [];
+      let remaining = atempo;
+      
+      while (remaining < 0.5) {
+        atempoFilters.push("atempo=0.5");
+        remaining /= 0.5; // e.g. 0.3 → 0.5 * 0.6
       }
+      atempoFilters.push(`atempo=${remaining.toFixed(4)}`);
       
-      // Step 2: Center-pad with silence to fill the full slot
-      // This ensures the speech is centered in the time window, so
-      // phrases at the end of the segment align better with the original
-      const frontPad = (targetDuration - audioDuration) / 2;
-      const totalPad = targetDuration;
+      const filterChain = atempoFilters.join(",");
       
-      if (frontPad > 0.05) {
-        const delayMs = Math.round(frontPad * 1000);
-        execSync(
-          `ffmpeg -y -i "${audioPath}" -af "adelay=${delayMs}|${delayMs},apad=whole_dur=${totalPad.toFixed(3)}" -t ${totalPad.toFixed(3)} "${outputPath}" 2>/dev/null`,
-          { encoding: "utf-8", timeout: 30000 }
-        );
-        
-        if (fs.existsSync(outputPath)) {
-          const newDuration = getAudioDuration(outputPath) || targetDuration;
-          // Clean up intermediate slowed file
-          if (audioPath !== inputPath) {
-            try { fs.unlinkSync(audioPath); } catch {}
-          }
-          return { path: outputPath, duration: newDuration, adjusted: true, padded: true };
-        }
-      }
+      execSync(
+        `ffmpeg -y -i "${inputPath}" -filter:a "${filterChain}" "${outputPath}" 2>/dev/null`,
+        { encoding: "utf-8", timeout: 30000 }
+      );
       
-      // Clean up intermediate
-      if (audioPath !== inputPath) {
-        try { fs.unlinkSync(audioPath); } catch {}
+      if (fs.existsSync(outputPath)) {
+        const newDuration = getAudioDuration(outputPath) || targetDuration;
+        return { 
+          path: outputPath, 
+          duration: newDuration, 
+          adjusted: true,
+          stretched: true,
+          atempo: atempo,
+        };
       }
     } catch (err) {
       // Fall through to return unadjusted
@@ -228,7 +227,7 @@ async function postProcessSpeedAdjust(inputPath, outputPath, targetDuration, cur
   // ── TOO LONG: speed up with atempo ──
   let atempo = Math.min(MAX_SPEEDUP, ratio);
   
-  // Build atempo filter chain
+  // Build atempo filter chain (atempo range per filter: 0.5 - 2.0)
   let atempoFilters = [];
   let remaining = atempo;
   
@@ -362,8 +361,8 @@ function createSpeakerVoiceMap(
     `   🎭 Creating voice map for ${numSpeakers} speakers (${language})`
   );
 
-  // Track which voices we've used to avoid duplicates when possible
-  const usedVoices = new Set();
+  // Track how many times each voice is used (for round-robin recycling)
+  const voiceUseCounts = new Map();
   const speakerVoiceMap = {};
 
   for (const speaker of speakers) {
@@ -379,50 +378,38 @@ function createSpeakerVoiceMap(
 
     // For non-Spanish languages (like Indonesian), use English voices
     if (language.toLowerCase() !== "spanish") {
-      // Use English voices for Indonesian and other languages
       voicePool = ENGLISH_VOICES[speakerGender] || ENGLISH_VOICES.neutral;
       console.log(`      Using English voice pool for ${language}`);
-    } else if (numSpeakers <= SPANISH_VOICE_LIMIT) {
-      // 1-3 speakers: Spanish-native only
+    } else {
+      // Always use Spanish-native voices — recycle them for 4+ speakers
       voicePool =
         SPANISH_NATIVE_VOICES[speakerGender] || SPANISH_NATIVE_VOICES.neutral;
-    } else {
-      // 4+ speakers: Spanish first, then English
-      voicePool = VOICE_POOL[speakerGender] || VOICE_POOL.neutral;
     }
 
-    // Find an unused voice if possible
+    // Round-robin: pick the voice used the fewest times so far
+    // (spreads speakers evenly across the available Spanish voices)
     let selectedVoice = voicePool[0];
+    let minUseCount = Infinity;
     for (const voice of voicePool) {
-      if (!usedVoices.has(voice)) {
+      const useCount = voiceUseCounts.get(voice) || 0;
+      if (useCount < minUseCount) {
+        minUseCount = useCount;
         selectedVoice = voice;
-        break;
       }
     }
 
     speakerVoiceMap[speaker] = selectedVoice;
-    usedVoices.add(selectedVoice);
+    voiceUseCounts.set(selectedVoice, (voiceUseCounts.get(selectedVoice) || 0) + 1);
   }
 
-  // Log the mapping
-  const usingEnglish = numSpeakers > SPANISH_VOICE_LIMIT;
-  if (usingEnglish) {
-    console.log(
-      `   🌎 Using Spanish + English voices (${numSpeakers} speakers)`
-    );
-  } else {
-    console.log(
-      `   🇪🇸 Using Spanish-native voices only (${numSpeakers} speakers)`
-    );
-  }
+  console.log(
+    `   🇪🇸 Using Spanish-native voices (${numSpeakers} speakers, recycling as needed)`
+  );
 
   console.log(`   🎭 Speaker voice mapping:`);
   for (const [speaker, voice] of Object.entries(speakerVoiceMap)) {
-    const isSpanish = SPANISH_NATIVE_VOICES.neutral.includes(voice);
     const gender = speakerGenders?.[speaker] || defaultGender;
-    console.log(
-      `      ${speaker} (${gender}) → ${voice} ${isSpanish ? "🇪🇸" : "🇺🇸"}`
-    );
+    console.log(`      ${speaker} (${gender}) → ${voice} 🇪🇸`);
   }
 
   return speakerVoiceMap;
@@ -514,6 +501,25 @@ async function generateSegmentTTS(text, index, outputDir, options = {}) {
     }
 
     const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+    // Validate response is actual audio (not an error page or truncated response)
+    const MIN_AUDIO_SIZE = 2048; // 2KB minimum for any real audio
+    if (audioBuffer.length < MIN_AUDIO_SIZE) {
+      throw new Error(
+        `TTS returned suspiciously small response (${audioBuffer.length} bytes) — likely corrupt or rate-limited`
+      );
+    }
+
+    // Check MP3 header: should start with FF FB, FF F3, FF F2 (MPEG frames) or ID3 tag
+    const hasMP3Header =
+      (audioBuffer[0] === 0xff && (audioBuffer[1] & 0xe0) === 0xe0) || // MPEG sync word
+      (audioBuffer[0] === 0x49 && audioBuffer[1] === 0x44 && audioBuffer[2] === 0x33); // ID3 tag
+    if (!hasMP3Header) {
+      throw new Error(
+        `TTS returned non-MP3 data (starts with 0x${audioBuffer.slice(0, 4).toString("hex")}, ${audioBuffer.length} bytes)`
+      );
+    }
+
     fs.writeFileSync(filePath, audioBuffer);
 
     const duration = getAudioDuration(filePath);
@@ -573,7 +579,7 @@ const OUTPUT_MODES = {
   synced: {
     speedMultiplier: 1.0,
     mergeOverlaps: false,
-    skipUnfittable: true, // Skip segments that can't fit at natural speed
+    skipUnfittable: false, // Never skip — include all segments, even if slightly off-duration
     description: "Synced audio with original video timing",
   },
   learner: {
@@ -611,7 +617,7 @@ const OUTPUT_MODES = {
 async function generateAndAlign(segments, outputDir, options = {}) {
   const {
     voice = "noel", // Default voice (used if no speaker mapping)
-    concurrency = 40, // Increased for speed
+    concurrency = 15, // Balanced: fast enough solo, safe with concurrent jobs
     minDuration = 0.3,
     maxRetries = 2, // Retry with adjusted speed if duration is off
     durationTolerance = 0.15, // Accept if within 15% of target
@@ -829,12 +835,38 @@ async function generateAndAlign(segments, outputDir, options = {}) {
           ) {
             attempt++;
 
-            ttsResult = await generateSegmentTTS(
-              textToSpeak, // Use potentially compressed text
-              seg.index,
-              ttsDir,
-              { voice: segmentVoice, speed, language }
-            );
+            // Retry loop for corrupt/rate-limited responses
+            let corruptRetries = 0;
+            const MAX_CORRUPT_RETRIES = 3;
+            while (true) {
+              try {
+                ttsResult = await generateSegmentTTS(
+                  textToSpeak, // Use potentially compressed text
+                  seg.index,
+                  ttsDir,
+                  { voice: segmentVoice, speed, language }
+                );
+                break; // Success — exit retry loop
+              } catch (retryErr) {
+                corruptRetries++;
+                if (
+                  corruptRetries < MAX_CORRUPT_RETRIES &&
+                  (retryErr.message.includes("corrupt") ||
+                   retryErr.message.includes("rate-limited") ||
+                   retryErr.message.includes("non-MP3") ||
+                   retryErr.message.includes("suspiciously small"))
+                ) {
+                  // Exponential backoff: 1s, 2s, 4s
+                  const delay = 1000 * Math.pow(2, corruptRetries - 1);
+                  console.error(
+                    `\n      ⚠️ Seg ${seg.index}: corrupt response (attempt ${corruptRetries}/${MAX_CORRUPT_RETRIES}), retrying in ${delay / 1000}s...`
+                  );
+                  await new Promise((r) => setTimeout(r, delay));
+                } else {
+                  throw retryErr; // Non-retryable error or max retries exhausted
+                }
+              }
+            }
 
             // Check duration accuracy
             durationError =

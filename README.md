@@ -1,140 +1,150 @@
-# 🌊 Immersion
+# Immersion
 
-Transform any video into comprehensible input for language learning.
+Transform any video into comprehensible input for language learning. Dub YouTube videos (or uploads) into simplified Spanish at your level, with the original background audio preserved.
 
-**Live Demo:** [Coming soon - deploy yours!]
+Inspired by [Dreaming Spanish](https://dreamingspanish.com) and the comprehensible input methodology by Dr. Stephen Krashen.
+
+## How It Works
+
+1. Download/upload a video, extract the audio
+2. Separate vocals from background (music, ambient sounds preserved)
+3. Transcribe speech with speaker diarization
+4. Translate and simplify to your Spanish level (A1-C1)
+5. Generate natural Spanish TTS (or clone the original speaker's voice)
+6. Align TTS timing to match original speech
+7. Output a fully dubbed video you can download to your phone
 
 ## Features
 
-- 🎬 **Video Dubbing** - Transform YouTube videos or uploads into comprehensible Spanish
-- 📚 **Adaptive Levels** - A1 to C1 language difficulty levels
-- 🎙️ **Voice Options** - Standard voices, premium ElevenLabs, or AI voice cloning
-- 🎯 **Multiple Modes** - Synced, narrator, learner, and more
-- 📱 **TikTok Export** - Create vertical short-form content
-- 🌐 **Multi-language** - Spanish and Indonesian (more coming soon)
+- **Adaptive Levels** - A1 to C1 CEFR language difficulty
+- **Voice Cloning** - XTTS clones the original speaker's voice
+- **Premium Voices** - ElevenLabs high-quality TTS (optional)
+- **Standard Voices** - Fast Lemonfox preset voices
+- **Multiple Modes** - Synced, narrator, learner, extended, and more
+- **YouTube Support** - Paste a URL, or upload your own video
+- **TikTok Export** - Vertical short-form output
+- **Multi-language** - Spanish and Indonesian (more coming)
+- **Phone Friendly** - Use from any device, download videos directly
 
-## Tech Stack
+## Pipeline
 
-### Frontend
-- React 19
-- Vite
-- Lucide React icons
+| Step       | Action                          | Technology                   | Output                                  |
+| ---------- | ------------------------------- | ---------------------------- | --------------------------------------- |
+| Ingest     | Download video, extract audio   | yt-dlp + FFmpeg              | `source_video.mp4` + `source_audio.wav` |
+| Split      | Separate vocals from background | Replicate Demucs (GPU)       | `vocals.mp3` + `background.mp3`         |
+| Transcribe | Speech-to-text with timestamps  | Lemonfox Whisper v3          | `transcription.json`                    |
+| Translate  | Duration-aware simplification   | Google Gemini 2.5 Flash      | `translation.json`                      |
+| TTS        | Generate dubbed audio           | Lemonfox / ElevenLabs / XTTS | `tts/*.wav`                             |
+| Merge      | Combine background + TTS        | FFmpeg                       | `dubbed_audio.m4a`                      |
+| Render     | Replace video audio track       | FFmpeg                       | `dubbed_video.mp4`                      |
 
-### Backend
-- Node.js + Express
-- FFmpeg for audio/video processing
-- Multiple AI services:
-  - **Replicate** (Demucs audio separation, XTTS voice cloning)
-  - **Lemonfox** (Whisper transcription, TTS)
-  - **Google Gemini** (Translation)
-  - **ElevenLabs** (Premium TTS - optional)
+### Cost Per Video (~5 minutes)
 
-## Local Development
+| Service            | Cost               |
+| ------------------ | ------------------ |
+| Replicate Demucs   | ~$0.07             |
+| Lemonfox Whisper   | ~$0.01             |
+| Gemini Translation | ~$0.00 (free tier) |
+| Lemonfox TTS       | ~$0.01             |
+| **Total**          | **~$0.10**         |
+
+Voice cloning (XTTS): ~$0.05 extra. ElevenLabs premium: ~$0.40 extra.
+
+## Quick Start (Local Development)
 
 ### Prerequisites
 
 - Node.js 20+
-- FFmpeg
-- API keys for: Replicate, Lemonfox, Gemini
+- FFmpeg installed
+- API keys: Replicate, Lemonfox, Gemini
 
 ### Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/Immersion.git
-   cd Immersion
-   ```
+```bash
+git clone https://github.com/yourusername/Immersion.git
+cd Immersion
 
-2. **Install dependencies**
-   ```bash
-   # Backend
-   cd server
-   npm install
-   
-   # Frontend
-   cd ../frontend
-   npm install
-   ```
+# Backend
+cd server
+npm install
+cp .env.example .env
+# Edit .env with your API keys
 
-3. **Configure environment variables**
-   ```bash
-   cd ../server
-   cp .env.example .env
-   nano .env  # Add your API keys
-   ```
+# Frontend
+cd ../frontend
+npm install
+```
 
-4. **Start development servers**
-   
-   Terminal 1 (Backend):
-   ```bash
-   cd server
-   npm run dev
-   ```
-   
-   Terminal 2 (Frontend):
-   ```bash
-   cd frontend
-   npm run dev
-   ```
+### Run
 
-5. **Open the app**
-   - Frontend: http://localhost:5173
-   - Backend API: http://localhost:3000
+Terminal 1 (Backend):
 
-## Deployment
+```bash
+cd server
+npm run dev
+```
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions.
+Terminal 2 (Frontend):
 
-### Quick Deploy to Railway
+```bash
+cd frontend
+npm run dev
+```
 
-1. Push to GitHub
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Add environment variables
-4. Generate domain
-5. Done! 🎉
+Open http://localhost:5173 in your browser.
+
+## Deploy (Access From Anywhere)
+
+The whole app (frontend + backend) is packaged into a single Docker container.
+
+### Option A: Cloudflare Tunnel (free, instant)
+
+Run from your own machine with a public URL for phone access:
+
+```bash
+./deploy.sh tunnel
+```
+
+Opens a free HTTPS URL you can use on your phone. Works whenever your machine is on.
+
+### Option B: Cloud Server ($4-12/month)
+
+Deploy to DigitalOcean, Hetzner, Oracle Cloud, etc:
+
+```bash
+# On the server after cloning:
+cp server/.env.example server/.env
+nano server/.env  # Add API keys
+docker compose up -d --build
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed guides per platform.
+
+### Option C: Docker locally
+
+```bash
+./deploy.sh local
+# App runs at http://localhost:3000
+```
 
 ### Environment Variables
 
 ```bash
 # Required
-REPLICATE_API_KEY=your_replicate_key
-LEMONFOX_API_KEY=your_lemonfox_key
-GEMINI_API_KEY=your_gemini_key
+REPLICATE_API_KEY=your_key    # Audio separation + voice cloning
+LEMONFOX_API_KEY=your_key     # Transcription + standard TTS
+GEMINI_API_KEY=your_key       # Translation
 
 # Optional
-ELEVENLABS_API_KEY=your_elevenlabs_key  # For premium voices
+ELEVENLABS_API_KEY=your_key   # Premium voices
+AUTH_PASSWORD=your_password    # Password-protect your instance
 PORT=3000
 NODE_ENV=production
 ```
 
-## Project Structure
+## API
 
-```
-Immersion/
-├── frontend/              # React frontend
-│   ├── src/
-│   │   ├── App.jsx       # Main app component
-│   │   └── App.css       # Styles
-│   ├── package.json
-│   └── vite.config.js
-├── server/               # Node.js backend
-│   ├── src/
-│   │   └── v2/          # Pipeline v2 modules
-│   ├── server.js        # Express server
-│   ├── api-v2.js        # API routes
-│   ├── pipeline-v2.js   # Main pipeline
-│   ├── input/           # Uploaded files
-│   ├── output/          # Generated videos
-│   ├── temp/            # Temporary files
-│   └── cache/           # Cached results
-├── Dockerfile           # Production build
-├── .dockerignore
-└── DEPLOYMENT.md        # Deployment guide
-```
-
-## API Usage
-
-### Process URL
+### Process a URL
 
 ```bash
 curl -X POST http://localhost:3000/api/v2/process \
@@ -148,12 +158,12 @@ curl -X POST http://localhost:3000/api/v2/process \
   }'
 ```
 
-### Upload File
+### Upload a File
 
 ```bash
 curl -X POST http://localhost:3000/api/v2/process-file \
   -F "file=@video.mp4" \
-  -F "level=B2" \
+  -F "level=B1" \
   -F "voice=neutral" \
   -F "mode=synced" \
   -F "language=spanish"
@@ -165,52 +175,60 @@ curl -X POST http://localhost:3000/api/v2/process-file \
 curl http://localhost:3000/api/v2/status/{jobId}
 ```
 
-## Cost Estimates
+## Project Structure
 
-Processing costs vary by features used:
+```
+Immersion/
+├── frontend/                # React 19 + Vite
+│   ├── src/
+│   │   ├── App.jsx          # Main app component
+│   │   └── App.css          # Styles
+│   └── package.json
+├── server/                  # Node.js + Express
+│   ├── server.js            # Express server + auth
+│   ├── api-v2.js            # API routes
+│   ├── pipeline-v2.js       # Pipeline orchestrator
+│   ├── src/v2/              # Pipeline modules
+│   │   ├── ingest.js        # Download + extract audio
+│   │   ├── split.js         # Demucs/Spleeter separation
+│   │   ├── transcribe.js    # Whisper STT
+│   │   ├── translate.js     # Gemini translation
+│   │   ├── tts.js           # Lemonfox TTS
+│   │   ├── xtts.js          # XTTS voice cloning
+│   │   ├── elevenlabs.js    # ElevenLabs premium TTS
+│   │   ├── merge.js         # FFmpeg audio mixing
+│   │   └── voice-extract.js # Voice sample extraction
+│   ├── input/               # Uploaded files
+│   ├── output/              # Generated videos
+│   ├── temp/                # Temporary files
+│   └── cache/               # Cached results
+├── Dockerfile               # Production Docker build
+├── docker-compose.yml       # One-command deployment
+├── deploy.sh                # Deploy helper script
+├── setup-server.sh          # VPS setup script
+└── DEPLOYMENT.md            # Detailed deployment guide
+```
 
-- **Learner tier** (Standard TTS): ~$0.05 per 5 minutes
-- **Immerser tier** (ElevenLabs): ~$0.50 per 5 minutes
-- **Pro tier** (Voice Cloning): ~$0.40 per 5 minutes
-- **Lip Sync** (optional): +$6.00 per 5 minutes
+## Language Levels
 
-## Features in Detail
+| Level | Name               | Description                        |
+| ----- | ------------------ | ---------------------------------- |
+| A1    | Superbeginner      | ~500 words, present tense only     |
+| A2    | Beginner           | ~1500 words, simple past           |
+| B1    | Intermediate       | ~3000 words, all indicative tenses |
+| B2    | Upper Intermediate | Full grammar                       |
+| C1    | Advanced           | Native-like complexity             |
 
-### Language Levels
+## Processing Modes
 
-- **A1** - Superbeginner (500 words, present tense only)
-- **A2** - Beginner (1500 words, simple past)
-- **B1** - Intermediate (3000 words, all indicative tenses)
-- **B2** - Upper Intermediate (full grammar)
-- **C1** - Advanced (native-like complexity)
-
-### Processing Modes
-
-- **Synced** - Direct translation keeping original timing
-- **Narrator** - Time-filling with slower, clearer speech
-- **Narrator Only** - Only dub the main speaker
-- **Learner** - Slower TTS, audio-only output
-- **Extended** - Video stretched to fit full translation
-- **Brainrot** - TikTok-style narration
-
-### Voice Options
-
-- **Standard** - Fast Lemonfox preset voices
-- **Premium** - High-quality ElevenLabs voices
-- **Voice Clone** - XTTS clones the original speaker
-
-## Contributing
-
-Contributions welcome! Please open an issue or PR.
+| Mode          | Description                                |
+| ------------- | ------------------------------------------ |
+| Synced        | Direct translation keeping original timing |
+| Narrator      | Time-filling with slower, clearer speech   |
+| Narrator Only | Only dub the main speaker                  |
+| Learner       | Slower TTS, audio-only output              |
+| Extended      | Video stretched to fit full translation    |
 
 ## License
 
 MIT
-
-## Acknowledgments
-
-Inspired by [Dreaming Spanish](https://dreamingspanish.com) and the comprehensible input methodology by Dr. Stephen Krashen.
-
----
-
-Built with ❤️ for language learners
