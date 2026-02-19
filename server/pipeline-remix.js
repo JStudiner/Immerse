@@ -516,11 +516,15 @@ Return ONLY the JSON object, no markdown, no explanation.`,
 
     if (useQwen && clone) {
       // ── Qwen3-TTS: Voice Clone mode ──
-      // Clone each speaker's voice, speak the restyled words
+      // Clone each speaker's voice, speak the restyled words.
+      // Also supports cross-lingual cloning: clone a voice + speak in another language
+      // when user provides a voicePrompt (e.g. "French woman" + clone = clone voice, speak French).
       console.log(`   🧠 Qwen3-TTS Voice Clone mode`);
 
       let speakerReferenceUrls = {};
+      let speakerReferenceTexts = {};
       let fallbackReferenceUrl = null;
+      let fallbackReferenceText = null;
 
       if (voiceFilePath && fs.existsSync(voiceFilePath)) {
         // User provided a single voice file — use it for all speakers
@@ -545,6 +549,12 @@ Return ONLY the JSON object, no markdown, no explanation.`,
             try {
               const uploaded = await uploadVoiceSample(samplePath, jobDir);
               speakerReferenceUrls[speakerId] = uploaded.url;
+              // Extract reference text from the segment used for the voice sample
+              const segText = sample.segmentUsed?.text;
+              if (segText) {
+                speakerReferenceTexts[speakerId] = segText;
+                console.log(`   📝 Reference text for ${speakerId}: "${segText.substring(0, 60)}${segText.length > 60 ? "..." : ""}"`);
+              }
             } catch (err) {
               console.log(`   ⚠️ Failed to upload sample for ${speakerId}: ${err.message}`);
             }
@@ -553,18 +563,34 @@ Return ONLY the JSON object, no markdown, no explanation.`,
 
         // Use first uploaded as fallback for speakers without samples
         fallbackReferenceUrl = Object.values(speakerReferenceUrls)[0] || null;
+        fallbackReferenceText = Object.values(speakerReferenceTexts)[0] || null;
       }
 
       const hasAnySample = fallbackReferenceUrl || Object.keys(speakerReferenceUrls).length > 0;
+
+      // Build style instruction for clone mode:
+      // If user provided a voicePrompt, use Gemini-derived style to modify delivery
+      // This enables "clone voice but speak like X" (cross-lingual, persona overlay)
+      const cloneStyleInstruction = voicePrompt
+        ? `Speak as: ${voicePrompt}. ${geminiVoiceExpansion ? `Embody: ${geminiVoiceExpansion.substring(0, 200)}.` : ""} Maintain the cloned voice's timbre but adapt delivery to match this character.`
+        : styleConfig.styleInstruction || null;
+
+      if (voicePrompt && hasAnySample) {
+        console.log(`   🎭 Cross-lingual/style clone: cloning voice + "${voicePrompt}" delivery`);
+      }
 
       if (hasAnySample) {
         const qwenResult = await generateAndAlignQwen(validSegments, jobDir, {
           mode: QWEN_MODES.VOICE_CLONE,
           referenceAudioUrl: fallbackReferenceUrl,
+          referenceText: fallbackReferenceText,
           speakerReferenceUrls: Object.keys(speakerReferenceUrls).length > 0
             ? speakerReferenceUrls
             : null,
-          styleInstruction: styleConfig.styleInstruction || null,
+          speakerReferenceTexts: Object.keys(speakerReferenceTexts).length > 0
+            ? speakerReferenceTexts
+            : null,
+          styleInstruction: cloneStyleInstruction,
           language: QWEN_LANGUAGES[ttsLanguage] || "auto",
           concurrency: ttsConcurrency,
         });

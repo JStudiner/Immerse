@@ -320,6 +320,7 @@ async function generateAndAlignQwen(segments, outputDir, options = {}) {
     maxTPS = 10,
     // Per-speaker overrides (maps speakerId -> config)
     speakerReferenceUrls = null, // { SPEAKER_00: "https://...", SPEAKER_01: "https://..." }
+    speakerReferenceTexts = null, // { SPEAKER_00: "text of sample", SPEAKER_01: "text of sample" }
     speakerVoiceMap = null, // { SPEAKER_00: { speaker: "aiden" }, SPEAKER_01: { speaker: "serena" } }
   } = options;
 
@@ -456,12 +457,16 @@ async function generateAndAlignQwen(segments, outputDir, options = {}) {
       const segSpeaker = segment?.speaker;
       let segMode = mode;
       let segReferenceAudio = referenceAudioUrl;
+      let segReferenceText = referenceText;
       let segVoiceDescription = voiceDescription;
       let segSpeakerName = speaker;
       let segStyleInstruction = styleInstruction;
 
       if (mode === QWEN_MODES.VOICE_CLONE && speakerReferenceUrls && segSpeaker) {
         segReferenceAudio = speakerReferenceUrls[segSpeaker] || referenceAudioUrl;
+      }
+      if (mode === QWEN_MODES.VOICE_CLONE && speakerReferenceTexts && segSpeaker) {
+        segReferenceText = speakerReferenceTexts[segSpeaker] || referenceText;
       }
 
       if (speakerVoiceMap && segSpeaker && speakerVoiceMap[segSpeaker]) {
@@ -487,7 +492,7 @@ async function generateAndAlignQwen(segments, outputDir, options = {}) {
       const result = await generateQwenTTS(text, rawPath, {
         mode: segMode,
         referenceAudio: segReferenceAudio,
-        referenceText,
+        referenceText: segReferenceText,
         voiceDescription: segVoiceDescription,
         speaker: segSpeakerName,
         styleInstruction: segStyleInstruction,

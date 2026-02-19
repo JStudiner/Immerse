@@ -756,8 +756,8 @@
 
 .video-container.portrait {
   aspect-ratio: 9 / 16;
-  max-height: 80vh;
-  max-width: 450px;
+  max-height: 65vh;
+  max-width: 360px;
   margin: 0 auto;
 }
 
@@ -2035,10 +2035,11 @@
     height: 14px;
   }
 
-  /* Portrait video fills width on mobile */
+  /* Portrait video on mobile — contained, not overwhelming */
   .video-container.portrait {
-    max-width: 100%;
-    max-height: 85vh;
+    max-width: 85%;
+    max-height: 60vh;
+    margin: 0 auto;
   }
 
   /* Player card mobile */
