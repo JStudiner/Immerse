@@ -247,17 +247,28 @@ async function downloadWithCobalt(url, outputPath, options = {}) {
       headers["Authorization"] = `Api-Key ${apiKey}`;
     }
 
+    // Detect if this is a YouTube URL for YouTube-specific options
+    const isYouTube = /youtube\.com|youtu\.be|youtube\.com\/shorts/i.test(url);
+
     // Step 1: Request download URL from Cobalt
+    const requestBody = {
+      url,
+      videoQuality,
+      audioFormat: "best",
+      filenameStyle: "classic",
+      downloadMode,
+    };
+
+    // YouTube-specific: use HLS and h264 for better compatibility with Shorts
+    if (isYouTube) {
+      requestBody.youtubeHLS = true;
+      requestBody.youtubeVideoCodec = "h264";
+    }
+
     const response = await fetch(apiEndpoint, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        url,
-        videoQuality,
-        audioFormat: "best",
-        filenameStyle: "classic",
-        downloadMode,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
@@ -267,13 +278,24 @@ async function downloadWithCobalt(url, outputPath, options = {}) {
 
     const data = await response.json();
 
-    // Handle Cobalt response statuses
+    // Handle Cobalt response statuses (v10 + v11 compatible)
     let downloadUrl;
     if (data.status === "redirect" || data.status === "tunnel") {
       downloadUrl = data.url;
+    } else if (data.status === "local-processing" && data.tunnel?.length > 0) {
+      // v11: local-processing — download the tunnel URLs and let ffmpeg merge
+      console.log(`   🔷 Cobalt: local-processing (${data.type}, ${data.tunnel.length} streams)`);
+      if (data.tunnel.length === 1 || data.type === "audio") {
+        downloadUrl = data.tunnel[0];
+      } else {
+        // Multiple streams need merging — download first (video) stream,
+        // ffmpeg will handle the rest during audio extraction
+        downloadUrl = data.tunnel[0];
+      }
     } else if (data.status === "picker" && data.picker?.length > 0) {
-      // Multiple options — pick the first (best) one
-      downloadUrl = data.picker[0].url;
+      // Multiple options — pick the video if available, otherwise first
+      const videoOption = data.picker.find(p => p.type === "video");
+      downloadUrl = (videoOption || data.picker[0]).url;
     } else if (data.status === "error") {
       throw new Error(
         `Cobalt error: ${data.error?.code || JSON.stringify(data).substring(0, 200)}`
@@ -288,7 +310,7 @@ async function downloadWithCobalt(url, outputPath, options = {}) {
 
     console.log(`   🔷 Got Cobalt URL, downloading file...`);
 
-    // Step 2: Stream the media file to disk (Cobalt tunnels are streamed responses)
+    // Step 2: Stream the media file to disk
     const fileResponse = await fetch(downloadUrl);
     if (!fileResponse.ok) {
       throw new Error(`File download failed: HTTP ${fileResponse.status}`);
@@ -358,27 +380,58 @@ async function downloadVideo(url, outputDir, sourceType = "url") {
   });
 
   if (!cobaltOk) {
-    // Fallback: yt-dlp
+    // Fallback: yt-dlp with multiple strategies
     console.log(`   📥 Falling back to yt-dlp...`);
-    try {
-      await youtubedl(url, {
-        format:
-          "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-        mergeOutputFormat: "mp4",
-        output: videoPath,
-        noCheckCertificates: true,
-        noWarnings: true,
-        extractorArgs: "youtube:player_client=android",
-      });
-    } catch (error) {
-      // Last resort: simplest yt-dlp format
-      console.log(`   ⚠️ Retrying with simpler format...`);
-      await youtubedl(url, {
-        format: "best",
-        output: videoPath,
-        noCheckCertificates: true,
-        extractorArgs: "youtube:player_client=android",
-      });
+
+    const strategies = [
+      {
+        label: "android client",
+        opts: {
+          format: "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+          mergeOutputFormat: "mp4",
+          output: videoPath,
+          noCheckCertificates: true,
+          noWarnings: true,
+          extractorArgs: "youtube:player_client=android",
+        },
+      },
+      {
+        label: "web client",
+        opts: {
+          format: "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+          mergeOutputFormat: "mp4",
+          output: videoPath,
+          noCheckCertificates: true,
+          noWarnings: true,
+          extractorArgs: "youtube:player_client=web",
+        },
+      },
+      {
+        label: "simple best",
+        opts: {
+          format: "best",
+          output: videoPath,
+          noCheckCertificates: true,
+        },
+      },
+    ];
+
+    let downloaded = false;
+    for (const strat of strategies) {
+      if (downloaded) break;
+      try {
+        console.log(`   📥 yt-dlp: trying ${strat.label}...`);
+        await youtubedl(url, strat.opts);
+        if (fs.existsSync(videoPath) && fs.statSync(videoPath).size > 10 * 1024) {
+          downloaded = true;
+        }
+      } catch (err) {
+        console.log(`   ⚠️ yt-dlp ${strat.label} failed: ${err.message?.substring(0, 100)}`);
+      }
+    }
+
+    if (!downloaded) {
+      throw new Error("All download methods failed (Cobalt + yt-dlp)");
     }
   }
 

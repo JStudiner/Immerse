@@ -40,40 +40,58 @@ const {
 
 const QWEN_TTS_MODEL = "qwen/qwen3-tts";
 
-// Qwen3-TTS language values (API expects these exact capitalized strings)
+// Qwen3-TTS natively supported languages (only these 10)
 const QWEN_LANGUAGES = {
   en: "English",
+  english: "English",
   zh: "Chinese",
+  chinese: "Chinese",
+  mandarin: "Chinese",
   ja: "Japanese",
+  japanese: "Japanese",
   ko: "Korean",
+  korean: "Korean",
   de: "German",
+  german: "German",
   fr: "French",
+  french: "French",
   ru: "Russian",
+  russian: "Russian",
   pt: "Portuguese",
+  portuguese: "Portuguese",
   es: "Spanish",
+  spanish: "Spanish",
   it: "Italian",
+  italian: "Italian",
+  auto: "auto",
 };
+
+// Set of supported language names for quick validation
+const SUPPORTED_LANGUAGE_NAMES = new Set([
+  "english", "chinese", "mandarin", "japanese", "korean",
+  "german", "french", "russian", "portuguese", "spanish", "italian",
+]);
+
+/**
+ * Check if a language name is natively supported by Qwen3-TTS.
+ */
+function isLanguageSupported(lang) {
+  if (!lang || lang === "auto") return true;
+  return SUPPORTED_LANGUAGE_NAMES.has(lang.toLowerCase());
+}
 
 /**
  * Normalize a language input to the API-expected format.
  * Accepts: "en", "english", "English", "auto", etc.
+ * Returns "auto" for unsupported languages.
  */
 function normalizeLanguage(lang) {
   if (!lang || lang === "auto") return "auto";
   const lower = lang.toLowerCase();
-  // Already a valid API value like "English"
-  if (Object.values(QWEN_LANGUAGES).map(v => v.toLowerCase()).includes(lower)) {
-    return lang.charAt(0).toUpperCase() + lower.slice(1);
-  }
-  // Short code like "en"
   if (QWEN_LANGUAGES[lower]) {
-    return QWEN_LANGUAGES[lower];
+    const val = QWEN_LANGUAGES[lower];
+    return val === "auto" ? "auto" : val;
   }
-  // Full word like "english"
-  const match = Object.entries(QWEN_LANGUAGES).find(
-    ([, v]) => v.toLowerCase() === lower,
-  );
-  if (match) return match[1];
   return "auto";
 }
 
@@ -360,6 +378,52 @@ async function generateAndAlignQwen(segments, outputDir, options = {}) {
   const ttsDir = path.join(outputDir, "tts_qwen");
   fs.mkdirSync(ttsDir, { recursive: true });
 
+  // ── Voice Anchoring ──
+  // In voice_design mode, each API call generates a slightly different voice.
+  // To fix this, we generate the first segment with voice_design to create the
+  // voice, then upload that audio and use voice_clone for all remaining segments.
+  // This locks in a consistent voice across all segments.
+  let anchorReferenceUrl = null;
+  // Per-speaker anchors for multi-speaker voice_design
+  const speakerAnchorUrls = {};
+
+  if (mode === QWEN_MODES.VOICE_DESIGN && segments.length > 1 && !speakerVoiceMap) {
+    console.log(`   🔒 Voice anchoring: will lock voice from first segment`);
+
+    // Find a segment with enough text for a good voice sample
+    const anchorIdx = segments.findIndex(s => {
+      const t = s?.restyledText || s?.translatedText || s?.translated || s?.text;
+      return t && t.trim().length >= 10;
+    });
+
+    if (anchorIdx >= 0) {
+      const anchorSeg = segments[anchorIdx];
+      const anchorText = anchorSeg?.restyledText || anchorSeg?.translatedText || anchorSeg?.translated || anchorSeg?.text;
+      const anchorPath = path.join(ttsDir, "anchor_voice.wav");
+
+      console.log(`   🎤 Generating anchor voice (segment ${anchorIdx})...`);
+      const anchorResult = await generateQwenTTS(anchorText, anchorPath, {
+        mode: QWEN_MODES.VOICE_DESIGN,
+        voiceDescription,
+        styleInstruction,
+        language,
+      });
+
+      if (anchorResult.success && fs.existsSync(anchorPath)) {
+        const anchorDuration = getAudioDuration(anchorPath);
+        if (anchorDuration >= 1) {
+          try {
+            const uploaded = await uploadVoiceSample(anchorPath, outputDir);
+            anchorReferenceUrl = uploaded.url;
+            console.log(`   ✅ Voice anchor locked (${anchorDuration.toFixed(1)}s sample)`);
+          } catch (err) {
+            console.log(`   ⚠️ Anchor upload failed, falling back to per-segment design: ${err.message}`);
+          }
+        }
+      }
+    }
+  }
+
   const limiter = new ConcurrentRateLimiter(maxTPS, concurrency);
   let completedCount = 0;
   let speedAdjusted = 0;
@@ -406,6 +470,17 @@ async function generateAndAlignQwen(segments, outputDir, options = {}) {
         if (cfg.speaker) segSpeakerName = cfg.speaker;
         if (cfg.voiceDescription) segVoiceDescription = cfg.voiceDescription;
         if (cfg.styleInstruction) segStyleInstruction = cfg.styleInstruction;
+      }
+
+      // Voice anchoring: use clone mode with the anchor reference instead of
+      // voice_design for all segments after anchor is established
+      const effectiveAnchor = segSpeaker && speakerAnchorUrls[segSpeaker]
+        ? speakerAnchorUrls[segSpeaker]
+        : anchorReferenceUrl;
+
+      if (effectiveAnchor && segMode === QWEN_MODES.VOICE_DESIGN) {
+        segMode = QWEN_MODES.VOICE_CLONE;
+        segReferenceAudio = effectiveAnchor;
       }
 
       // Generate TTS
@@ -586,5 +661,7 @@ module.exports = {
   QWEN_LANGUAGES,
   QWEN_MODES,
   PRESET_SPEAKERS,
+  SUPPORTED_LANGUAGE_NAMES,
   normalizeLanguage,
+  isLanguageSupported,
 };

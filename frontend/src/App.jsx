@@ -25,6 +25,8 @@ import {
   Music,
   Heart,
   Plus,
+  Maximize,
+  Minimize,
 } from "lucide-react";
 import "./App.css";
 
@@ -449,6 +451,10 @@ function App() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPortraitVideo, setIsPortraitVideo] = useState(false);
+  const remixPlayerRef = useRef(null);
+  const [isScrubbing, setIsScrubbing] = useState(false);
   const [voiceVolume, setVoiceVolume] = useState(0.85);
   const [bgVolume, setBgVolume] = useState(0.3);
   const prevVoiceVolume = useRef(0.85);
@@ -472,14 +478,30 @@ function App() {
   const [remixPremium, setRemixPremium] = useState(() =>
     getPersistedState("remixPremium", false),
   );
-  const [savedVoices, setSavedVoices] = useState(() =>
-    getPersistedState("savedVoices", []),
-  );
+  const DEFAULT_VOICES = [
+    { id: "preset_spanish_b1", name: "Spanish B1", prompt: "Spanish guy, B1 intermediate level", emoji: "🇪🇸", clone: false },
+    { id: "preset_spanish", name: "Spanish", prompt: "Spanish speaker, native fluency", emoji: "🇪🇸", clone: false },
+    { id: "preset_french", name: "French", prompt: "French speaker, native fluency", emoji: "🇫🇷", clone: false },
+    { id: "preset_pirate", name: "Pirate", prompt: "Grizzled pirate captain with a thick West Country accent", emoji: "🏴‍☠️", clone: false },
+    { id: "preset_british_doc", name: "British Documentary", prompt: "British documentary narrator, like David Attenborough", emoji: "🇬🇧", clone: false },
+  ];
+  const [savedVoices, setSavedVoices] = useState(() => {
+    const persisted = getPersistedState("savedVoices", null);
+    if (persisted && persisted.length > 0) return persisted;
+    return DEFAULT_VOICES;
+  });
   const [newVoicePrompt, setNewVoicePrompt] = useState("");
   const [newVoiceClone, setNewVoiceClone] = useState(false);
+  const [remixVoiceSampleUrl, setRemixVoiceSampleUrl] = useState(null);
+  const [remixExtractUrl, setRemixExtractUrl] = useState("");
+  const [remixExtractFile, setRemixExtractFile] = useState(null);
+  const [remixExtractSamples, setRemixExtractSamples] = useState([]);
+  const [isRemixExtracting, setIsRemixExtracting] = useState(false);
   // Voice versions: [{id, name, audioUrl, voicePrompt, clone}]
   const [voiceVersions, setVoiceVersions] = useState([]);
   const [activeVoiceIdx, setActiveVoiceIdx] = useState(-1);
+  // Track the latest job directory for caching re-remixes
+  const [latestJobDir, setLatestJobDir] = useState(null);
   // Remix player toggles
   const [remixOriginalOn, setRemixOriginalOn] = useState(true);
   const [remixBgOn, setRemixBgOn] = useState(true);
@@ -628,10 +650,16 @@ function App() {
     sessionStorage.setItem("immerse-result", JSON.stringify(result));
   }, [result]);
 
-  // When a remix result arrives, capture its voice audio as a version
+  // When a remix result arrives, capture its voice audio as a version + cache jobDir
   useEffect(() => {
     if (result && (result.restyledVoiceUrl || result.voiceOnlyUrl)) {
       const audioUrl = result.restyledVoiceUrl || result.voiceOnlyUrl;
+
+      // Track the latest job directory for caching re-remixes
+      if (result.jobDir) {
+        setLatestJobDir(result.jobDir);
+      }
+
       setVoiceVersions((prev) => {
         if (prev.some((v) => v.audioUrl === audioUrl)) return prev;
         const label = remixVoicePrompt || "Default voice";
@@ -789,13 +817,21 @@ function App() {
     };
   }, [jobId, isProcessing]);
 
-  // Sync playback speed across all media elements
+  // Sync playback speed across all media elements (dev + remix)
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = playbackSpeed;
     if (audioRef.current) audioRef.current.playbackRate = playbackSpeed;
     if (voiceAudioRef.current)
       voiceAudioRef.current.playbackRate = playbackSpeed;
     if (bgAudioRef.current) bgAudioRef.current.playbackRate = playbackSpeed;
+    // Remix audio refs
+    if (originalVocalsRef.current) originalVocalsRef.current.playbackRate = playbackSpeed;
+    if (remixBgRef.current) remixBgRef.current.playbackRate = playbackSpeed;
+    if (voiceAudioRefs.current) {
+      Object.values(voiceAudioRefs.current).forEach((el) => {
+        if (el) el.playbackRate = playbackSpeed;
+      });
+    }
   }, [playbackSpeed]);
 
   // Sync separate audio volumes
@@ -1093,6 +1129,7 @@ function App() {
     setResult(null);
     setVoiceVersions([]);
     setActiveVoiceIdx(-1);
+    setLatestJobDir(null);
     setJobId(null);
     setProgress(0);
     setCurrentStep("");
@@ -1100,6 +1137,7 @@ function App() {
     setIsPlaying(false);
     setCurrentTime(0);
     setVideoDuration(0);
+    setIsPortraitVideo(false);
     setVoiceVolume(0.85);
     setBgVolume(0.3);
     setIsProcessing(false);
@@ -1158,6 +1196,39 @@ function App() {
   };
 
 
+  // Extract voice samples for remix clone mode
+  const handleRemixExtract = async () => {
+    setIsRemixExtracting(true);
+    setRemixExtractSamples([]);
+    try {
+      let response;
+      if (remixExtractFile) {
+        const formData = new FormData();
+        formData.append("file", remixExtractFile);
+        formData.append("mode", "auto");
+        formData.append("samplesPerSpeaker", "2");
+        response = await fetch(`${API_URL}/v2/extract-voice`, { method: "POST", body: formData });
+      } else if (remixExtractUrl.trim()) {
+        response = await fetch(`${API_URL}/v2/extract-voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: remixExtractUrl.trim(), mode: "auto", samplesPerSpeaker: 2 }),
+        });
+      } else return;
+
+      if (!response.ok) throw new Error("Extraction failed");
+      const data = await response.json();
+      setRemixExtractSamples(data.samples || []);
+      if (data.samples?.length > 0) {
+        setRemixVoiceSampleUrl(data.samples[0].url);
+      }
+    } catch (err) {
+      setError(`Voice extraction failed: ${err.message}`);
+    } finally {
+      setIsRemixExtracting(false);
+    }
+  };
+
   // Remix submit handler — accepts optional overrides for re-remix flow
   const handleRemixSubmit = async (overrides = {}) => {
     const isReRemix = !!overrides.voicePrompt && !!result;
@@ -1178,8 +1249,13 @@ function App() {
     const activeVoicePrompt = overrides.voicePrompt ?? (remixVoicePrompt || null);
     const activeClone = overrides.clone ?? remixClone;
 
+    // For re-remix, pass the previous job directory to skip ingest/split/transcribe
+    const cacheDir = isReRemix ? latestJobDir : null;
+
     try {
       let response;
+
+      const activeSampleUrl = activeClone ? remixVoiceSampleUrl : null;
 
       if (inputType === "file" && uploadedFile) {
         const formData = new FormData();
@@ -1189,6 +1265,8 @@ function App() {
           formData.append("voicePrompt", activeVoicePrompt);
         formData.append("clone", activeClone.toString());
         formData.append("premium", remixPremium.toString());
+        if (cacheDir) formData.append("fromJobDir", cacheDir);
+        if (activeSampleUrl) formData.append("voiceSampleUrl", activeSampleUrl);
 
         response = await fetch(`${API_URL}/v2/remix-file`, {
           method: "POST",
@@ -1206,6 +1284,8 @@ function App() {
             voicePrompt: activeVoicePrompt,
             clone: activeClone,
             premium: remixPremium,
+            fromJobDir: cacheDir,
+            voiceSampleUrl: activeSampleUrl,
           }),
         });
       }
@@ -1287,18 +1367,102 @@ function App() {
     }
   };
 
-  const handleRemixSeek = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const percent = (e.clientX - rect.left) / rect.width;
-    const newTime = percent * videoDuration;
+  // Scrubbing: mousedown starts scrub, mousemove seeks in real-time, mouseup commits
+  const scrubTimelineRef = useRef(null);
+  const wasPlayingBeforeScrub = useRef(false);
 
+  const getSeekTime = (e) => {
+    const bar = scrubTimelineRef.current;
+    if (!bar) return 0;
+    const rect = bar.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    return percent * videoDuration;
+  };
+
+  const seekToTime = (newTime) => {
     if (videoRef.current) videoRef.current.currentTime = newTime;
-    // Only seek active audio elements
-    getActiveAudioEls().forEach((a) => {
-      a.currentTime = newTime;
-    });
+    getActiveAudioEls().forEach((a) => { a.currentTime = newTime; });
     setCurrentTime(newTime);
   };
+
+  const handleScrubStart = (e) => {
+    e.preventDefault();
+    setIsScrubbing(true);
+    wasPlayingBeforeScrub.current = isPlaying;
+    // Pause during scrub for snappy feedback
+    if (isPlaying) {
+      videoRef.current?.pause();
+      getAllAudioEls().forEach((a) => a.pause());
+    }
+    seekToTime(getSeekTime(e));
+  };
+
+  useEffect(() => {
+    if (!isScrubbing) return;
+    const handleMove = (e) => seekToTime(getSeekTime(e));
+    const handleUp = () => {
+      setIsScrubbing(false);
+      if (wasPlayingBeforeScrub.current) {
+        videoRef.current?.play();
+        getActiveAudioEls().forEach((a) => a.play());
+      }
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("touchmove", (e) => handleMove(e.touches[0]));
+    window.addEventListener("touchend", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isScrubbing]);
+
+  // Simple click seek (fallback for non-drag)
+  const handleRemixSeek = (e) => seekToTime(getSeekTime(e));
+
+  // Fullscreen toggle — uses native API where available, CSS fallback for iOS
+  const toggleFullscreen = () => {
+    const el = remixPlayerRef.current;
+    if (!el) return;
+
+    if (isFullscreen) {
+      // Exit fullscreen
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.() || document.webkitExitFullscreen?.();
+      } else if (document.webkitFullscreenElement) {
+        document.webkitExitFullscreen?.();
+      }
+      setIsFullscreen(false);
+      document.body.style.overflow = "";
+    } else {
+      // Enter fullscreen — try native API first, CSS fallback for mobile/iOS
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {
+          setIsFullscreen(true);
+          document.body.style.overflow = "hidden";
+        });
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      } else {
+        setIsFullscreen(true);
+        document.body.style.overflow = "hidden";
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      const isNativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      setIsFullscreen(isNativeFs);
+      if (!isNativeFs) document.body.style.overflow = "";
+    };
+    document.addEventListener("fullscreenchange", handleFsChange);
+    document.addEventListener("webkitfullscreenchange", handleFsChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFsChange);
+      document.removeEventListener("webkitfullscreenchange", handleFsChange);
+    };
+  }, []);
 
   // Toggle original voice (radio: turns off voice versions)
   const handleToggleOriginal = () => {
@@ -1631,6 +1795,59 @@ function App() {
                     </button>
                   )}
                 </div>
+
+                {/* Voice Extraction — shown when clone is on */}
+                {remixClone && (
+                  <div style={{ marginTop: "0.75rem", padding: "0.75rem", background: "var(--bg-elevated)", borderRadius: "var(--radius-lg)", border: "1px solid var(--border-subtle)" }}>
+                    <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>
+                      Optionally extract a voice from another video to clone:
+                    </p>
+                    <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                      <input
+                        type="text"
+                        className="input no-icon"
+                        placeholder="Paste YouTube/TikTok URL with voice to clone"
+                        value={remixExtractUrl}
+                        onChange={(e) => setRemixExtractUrl(e.target.value)}
+                        style={{ flex: 1, fontSize: "0.85rem" }}
+                      />
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: "0.5rem 0.75rem", fontSize: "0.8rem", whiteSpace: "nowrap" }}
+                        disabled={isRemixExtracting || !remixExtractUrl.trim()}
+                        onClick={handleRemixExtract}
+                      >
+                        {isRemixExtracting ? "Extracting..." : "Extract"}
+                      </button>
+                    </div>
+                    {remixExtractSamples.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                        {remixExtractSamples.map((s) => (
+                          <button
+                            key={s.id}
+                            className={`remix-style-card ${remixVoiceSampleUrl === s.url ? "selected" : ""}`}
+                            style={{ padding: "0.4rem 0.6rem", flexDirection: "row", gap: "0.3rem", minWidth: "auto", fontSize: "0.8rem" }}
+                            onClick={() => setRemixVoiceSampleUrl(s.url)}
+                          >
+                            <Mic size={14} />
+                            <span>{s.speaker || s.id}</span>
+                            <span style={{ fontSize: "0.7rem", opacity: 0.6 }}>{s.duration ? `${s.duration.toFixed(1)}s` : ""}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {remixVoiceSampleUrl && (
+                      <p style={{ fontSize: "0.75rem", color: "var(--accent)", marginTop: "0.4rem" }}>
+                        Voice sample selected — will clone this voice
+                      </p>
+                    )}
+                    {!remixVoiceSampleUrl && !remixExtractSamples.length && (
+                      <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", opacity: 0.6 }}>
+                        No voice selected — will clone from the input video
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Submit */}
@@ -1688,7 +1905,7 @@ function App() {
         {/* Remix Result Player */}
         {appMode === "remix" && result && isRemixResult && (
           <section className="player-section">
-            <div className="player-card">
+            <div className={`player-card ${isFullscreen ? "fullscreen" : ""}`} ref={remixPlayerRef}>
               <div className="player-header">
                 <div className="player-title">
                   <h3>Your Remixed Video</h3>
@@ -1717,21 +1934,32 @@ function App() {
                       <Download size={20} />
                     </a>
                   )}
+                  <button
+                    className="btn-icon"
+                    onClick={toggleFullscreen}
+                    title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                  >
+                    {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
+                  </button>
                 </div>
               </div>
 
               {/* Video Player (muted - audio comes from separate tracks) */}
               {result.videoUrl && (
-                <div className="video-container">
+                <div className={`video-container ${isPortraitVideo ? "portrait" : ""}`}>
                   <video
                     ref={videoRef}
                     src={result.videoUrl}
                     onTimeUpdate={() =>
                       setCurrentTime(videoRef.current?.currentTime || 0)
                     }
-                    onLoadedMetadata={() =>
-                      setVideoDuration(videoRef.current?.duration || 0)
-                    }
+                    onLoadedMetadata={() => {
+                      const v = videoRef.current;
+                      if (v) {
+                        setVideoDuration(v.duration || 0);
+                        setIsPortraitVideo(v.videoHeight > v.videoWidth);
+                      }
+                    }}
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
                     muted
@@ -1806,7 +2034,13 @@ function App() {
                   {isPlaying ? <Pause size={24} /> : <Play size={24} />}
                 </button>
                 <div className="timeline">
-                  <div className="timeline-bar" onClick={handleRemixSeek}>
+                  <div
+                    className={`timeline-bar ${isScrubbing ? "scrubbing" : ""}`}
+                    ref={scrubTimelineRef}
+                    onMouseDown={handleScrubStart}
+                    onTouchStart={(e) => { e.preventDefault(); handleScrubStart(e.touches[0]); }}
+                    onClick={handleRemixSeek}
+                  >
                     <div
                       className="timeline-progress"
                       style={{
@@ -1820,6 +2054,21 @@ function App() {
                     <span>{formatTime(currentTime)}</span>
                     <span>{formatTime(videoDuration)}</span>
                   </div>
+                </div>
+              </div>
+              {/* Speed Control */}
+              <div className="speed-control">
+                <span className="speed-label">Speed</span>
+                <div className="speed-buttons">
+                  {SPEEDS.map((speed) => (
+                    <button
+                      key={speed}
+                      className={`speed-btn ${playbackSpeed === speed ? "active" : ""}`}
+                      onClick={() => setPlaybackSpeed(speed)}
+                    >
+                      {speed}x
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -3313,16 +3562,20 @@ function App() {
 
               {/* Video Player */}
               {result.videoUrl && (
-                <div className="video-container">
+                <div className={`video-container ${isPortraitVideo ? "portrait" : ""}`}>
                   <video
                     ref={videoRef}
                     src={result.videoUrl}
                     onTimeUpdate={() =>
                       setCurrentTime(videoRef.current?.currentTime || 0)
                     }
-                    onLoadedMetadata={() =>
-                      setVideoDuration(videoRef.current?.duration || 0)
-                    }
+                    onLoadedMetadata={() => {
+                      const v = videoRef.current;
+                      if (v) {
+                        setVideoDuration(v.duration || 0);
+                        setIsPortraitVideo(v.videoHeight > v.videoWidth);
+                      }
+                    }}
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
                     muted={hasSeparateTracks ? true : isMuted}

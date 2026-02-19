@@ -1177,6 +1177,8 @@ router.post("/remix", upload.single("voiceFile"), async (req, res) => {
     premium = false,
     startTime = null,
     duration = null,
+    fromJobDir = null,
+    voiceSampleUrl = null,
   } = req.body;
 
   if (!url) {
@@ -1191,6 +1193,11 @@ router.post("/remix", upload.single("voiceFile"), async (req, res) => {
   let voiceFilePath = null;
   if (req.file) {
     voiceFilePath = req.file.path;
+  } else if (voiceSampleUrl) {
+    const samplePath = path.join(__dirname, voiceSampleUrl);
+    if (fs.existsSync(samplePath)) {
+      voiceFilePath = samplePath;
+    }
   }
 
   jobs.set(jobId, {
@@ -1223,6 +1230,7 @@ router.post("/remix", upload.single("voiceFile"), async (req, res) => {
     startTime,
     duration,
     voiceFilePath,
+    fromJobDir: fromJobDir || null,
   });
 
   res.json({ jobId, status: "processing" });
@@ -1249,6 +1257,8 @@ router.post("/remix-file", multiUpload, async (req, res) => {
     premium = "false",
     startTime = null,
     duration = null,
+    fromJobDir = null,
+    voiceSampleUrl = null,
   } = req.body;
 
   const parsedClone = clone === "true" || clone === true;
@@ -1284,7 +1294,8 @@ router.post("/remix-file", multiUpload, async (req, res) => {
     premium: parsedPremium,
     startTime,
     duration,
-    voiceFilePath: voiceFile?.path || null,
+    voiceFilePath: voiceFile?.path || (voiceSampleUrl ? (() => { const p = path.join(__dirname, voiceSampleUrl); return fs.existsSync(p) ? p : null; })() : null),
+    fromJobDir: fromJobDir || null,
   });
 
   res.json({
@@ -1313,6 +1324,7 @@ function runRemixPipeline(jobId, options) {
   if (options.startTime) args.push("--start", options.startTime);
   if (options.duration) args.push("--duration", options.duration);
   if (options.voiceFilePath) args.push("--voice-file", options.voiceFilePath);
+  if (options.fromJobDir) args.push("--from-job", options.fromJobDir);
 
   console.log(`\n🎨 Starting remix pipeline for job ${jobId}`);
   console.log(`   Command: node ${args.join(" ")}\n`);
@@ -1327,7 +1339,10 @@ function runRemixPipeline(jobId, options) {
     job.logs.push(output);
 
     // Parse progress from output
-    if (output.includes("INGEST")) {
+    if (output.includes("CACHE HIT")) {
+      job.currentStep = "Loading cached data...";
+      job.progress = 50;
+    } else if (output.includes("INGEST")) {
       job.currentStep = "Downloading video...";
       job.progress = 5;
     } else if (output.includes("SPLIT") || output.includes("TRANSCRIBE")) {
@@ -1388,6 +1403,7 @@ function runRemixPipeline(jobId, options) {
 
         job.result = {
           jobId,
+          jobDir: dirBase,
           type: "remix",
           videoUrl: fs.existsSync(path.join(jobDir, "dubbed_video.mp4"))
             ? `/audio/${dirBase}/dubbed_video.mp4`

@@ -56,6 +56,7 @@ const {
   uploadVoiceSample,
   QWEN_LANGUAGES,
   QWEN_MODES,
+  isLanguageSupported,
 } = require("./src/v2/qwen-tts");
 const { renderVideo } = require("./src/v2/merge");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -87,6 +88,7 @@ async function runRemixPipeline(source, options = {}) {
     start = null,
     clipDuration = null,
     voiceFilePath = null,
+    fromJob = null, // Previous job directory name for caching (skips ingest/split/transcribe/restyle)
   } = options;
 
   const styleConfig = VOICE_STYLES[style] || {
@@ -103,6 +105,7 @@ async function runRemixPipeline(source, options = {}) {
   // ── Auto-derive text restyle + gender from voice prompt via Gemini ──
   let derivedCustomPrompt = customPrompt;
   let derivedGender = "male";
+  let geminiVoiceExpansion = null;
 
   if (voicePrompt && !customPrompt) {
     try {
@@ -114,16 +117,45 @@ async function runRemixPipeline(source, options = {}) {
             role: "user",
             parts: [
               {
-                text: `You are analyzing a voice description prompt for a text-to-speech system. The user wants to change how a video sounds.
+                text: `You are analyzing a voice description prompt for a text-to-speech system (Qwen3-TTS). The user wants to change how a video sounds.
 
 Voice prompt: "${voicePrompt}"
 
+IMPORTANT CONTEXT — The TTS engine only supports these 10 accents/languages natively:
+English, Chinese/Mandarin, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian.
+It CANNOT produce accents outside this list (e.g. Mongolian, Arabic, Hindi, Swahili, etc.).
+
 Analyze this prompt and return a JSON object with exactly these fields:
 {
-  "gender": "male" or "female" — the gender of the voice being described. Default to "male" if unclear.
-  "language": null or a language name (e.g. "Spanish", "Japanese", "Swahili") — if the prompt implies the output should be in a non-English language. Only set this if there's a clear language intent (nationality, language name, accent that implies translation). A "British accent" or "Southern drawl" is still English — set null.
+  "gender": "male" or "female" — the gender of the voice. Default "male" if unclear.
+
+  "language": null or a language name — RULES:
+    - If the prompt mentions a non-English language or nationality (French, Spanish, Japanese, Korean, etc.), SET the language to that language. "French woman" → "French". "Spanish guy" → "Spanish". "Japanese speaker" → "Japanese".
+    - ONLY set null if: (a) the prompt is purely English with no foreign language implied (e.g. "deep voice", "old man", "pirate"), OR (b) the prompt explicitly says "accent" or "English-speaking" (e.g. "woman with a French accent" → null, because they want English with French accent, not French language).
+    - "British", "Australian", "Southern", "Valley girl" = still English → null.
+    - When in doubt about a nationality, SET the language. Users expect "French woman" = speak French.
+
   "level": null or a proficiency level (e.g. "B1", "A2", "beginner") — if mentioned.
-  "textRestyle": null or a short instruction for rewriting transcript text to match the persona/character. Examples: for a pirate → "Rewrite using pirate slang and nautical terms", for a sports announcer → "Rewrite as excited sports commentary". Only set this if the voice persona implies the WORDS should change, not just the voice. A "deep voice" or "old man" does NOT need text restyle. A "pirate" or "anime villain" DOES.
+
+  "textRestyle": null or a short instruction for rewriting transcript text to match the persona/character. Only set this if the voice persona implies the WORDS themselves should change (pirate slang, sports commentary, etc.). A "deep voice" or language/nationality does NOT need text restyle.
+
+  "voiceExpansion": A detailed 2-3 sentence description of CONCRETE VOCAL QUALITIES for this voice. This goes directly to the TTS engine as voice_description, so it must describe audio signal traits, not vibes.
+    
+    RULES for voiceExpansion:
+    1. Focus on: pitch (Hz range: low/mid/high), timbre (gravelly/smooth/breathy/nasal/resonant/raspy/booming), pace (fast/measured/slow/deliberate), energy (intense/calm/explosive/gentle), and delivery style.
+    2. For SUPPORTED accents (English, French, Spanish, German, Italian, Portuguese, Russian, Japanese, Korean, Chinese): Make the accent the DOMINANT, FIRST quality. Describe specific phonetic features: "non-rhotic speech", "rolled Rs", "aspirated consonants", "nasal vowels", etc.
+    3. For UNSUPPORTED accents (Mongolian, Arabic, Hindi, Swahili, etc.): Do NOT describe the accent (the engine can't produce it). Instead, go EXTREME on achievable qualities — timbre, aggression, pitch, pace, energy, breathiness, growl. Make the CHARACTER come through in the voice quality even without the accent.
+    4. Be BOLD and EXTREME. Never generic. "A deep male voice" is WRONG. "An extremely deep, thundering, gravelly male voice that rumbles like an earthquake" is RIGHT.
+    
+    Examples:
+    - "British documentary host" → "A distinctly British male voice with a rich, refined BBC Received Pronunciation accent — elongated vowels, crisp 't' and 'th' sounds, non-rhotic Rs, and quintessentially English phrasing patterns. Deep, warm, resonant timbre like velvet over oak. Speaks with measured, reverent pacing and a sense of wonder, as if every sentence reveals something magnificent."
+    - "French woman" → "A sultry, mid-pitched female voice with a pronounced native French accent — soft nasal vowels, uvular R sounds, and lilting melodic intonation that rises and falls musically. Smooth, silky timbre with a breathy, intimate quality. Elegant, unhurried pacing with natural French speech rhythms."
+    - "Pirate" → "A rough, raspy, gravelly male voice dripping with a thick West Country English accent — heavy 'arrr' sounds on every R, dropped H's, slurred words, and growling intonation. Deep, barrel-chested timbre with a menacing, drunken energy. Speaks with boisterous theatrical flair, bellowing and snarling between phrases."
+    - "Mongolian warlord" → "An extremely deep, thunderous, guttural male voice that resonates from the chest like a war drum. Harsh, explosive consonants bitten off with fury. Slow, deliberate, menacing pacing where each word lands like a hammer blow. Raw, primal vocal energy with aggressive growling between phrases and an intimidating, commanding presence."
+    - "Anime girl" → "A very high-pitched, bright, sparkly female voice with exaggerated Japanese kawaii speech patterns — elongated vowels, rising intonation, and playful vocal fry. Extremely bubbly and energetic with dramatic gasps and squeals. Light, airy, almost childlike timbre that bounces with infectious enthusiasm."
+    - "Super flamboyant gay man" → "A high-pitched, dramatic male voice with exaggerated vocal fry and theatrical rising intonation. Extremely expressive with drawn-out vowels, sassy emphasis, and flamboyant delivery. Bright, nasal timbre with a quick, animated pace and constant tonal variation — every sentence is a performance."
+
+    Always provide this field. Be vivid. Be extreme. Generic = bad.
 }
 
 Return ONLY the JSON object, no markdown, no explanation.`,
@@ -145,9 +177,22 @@ Return ONLY the JSON object, no markdown, no explanation.`,
           : "";
         derivedCustomPrompt = `Translate the transcript to ${analysis.language}${levelStr} Keep the same meaning and emotional tone.`;
         console.log(`   🌍 Gemini detected language: ${analysis.language}${analysis.level ? ` (${analysis.level})` : ""}`);
+
+        // Warn if the detected language isn't natively supported by Qwen3-TTS
+        if (!isLanguageSupported(analysis.language)) {
+          console.log(`   ⚠️ "${analysis.language}" is NOT natively supported by Qwen3-TTS`);
+          console.log(`   ⚠️ Supported: English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian`);
+          console.log(`   ⚠️ Voice accent quality may be limited — text will still be translated`);
+        }
       } else if (analysis.textRestyle) {
         derivedCustomPrompt = analysis.textRestyle;
         console.log(`   🎭 Gemini detected persona restyle: "${analysis.textRestyle.substring(0, 60)}..."`);
+      }
+
+      // Store the expanded voice description from Gemini
+      if (analysis.voiceExpansion) {
+        geminiVoiceExpansion = analysis.voiceExpansion;
+        console.log(`   🎙️ Gemini voice expansion: "${analysis.voiceExpansion.substring(0, 80)}..."`);
       }
 
       console.log(`   👤 Gemini inferred gender: ${derivedGender}`);
@@ -190,132 +235,241 @@ Return ONLY the JSON object, no markdown, no explanation.`,
   fs.mkdirSync(jobDir, { recursive: true });
 
   console.log(`\n   📁 Job: ${jobId}`);
-  console.log(`   📂 Output: ${jobDir}\n`);
+  console.log(`   📂 Output: ${jobDir}`);
+  if (fromJob) console.log(`   ⚡ Re-remix from: ${fromJob}`);
+  console.log();
 
   const pipelineStart = Date.now();
   const timings = {};
 
   try {
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 1: INGEST - Download/load video
-    // ═══════════════════════════════════════════════════════════════
-    console.log(`${"═".repeat(60)}`);
-    console.log(`📥 STEP 1: INGEST`);
-    console.log(`${"═".repeat(60)}`);
-
-    let stepStart = Date.now();
-    const ingestResult = await ingest(source, jobDir, {
-      start,
-      duration: clipDuration,
-    });
-    timings.ingest = (Date.now() - stepStart) / 1000;
-
-    console.log(
-      `   ✅ Ingested: ${formatDuration(ingestResult.media.duration)} video`,
-    );
+    let ingestResult;
+    let splitPromise;
+    let transcribeResult;
+    let cleanSegments;
+    let restyledSegments;
+    let stepStart;
 
     // ═══════════════════════════════════════════════════════════════
-    // STEP 2 & 3: PARALLEL - Split + Transcribe
+    // CACHED PATH: Reuse previous job's ingest/split/transcribe/restyle
     // ═══════════════════════════════════════════════════════════════
-    console.log(`\n${"═".repeat(60)}`);
-    console.log(`⚡ STEP 2+3: SPLIT + TRANSCRIBE (parallel)`);
-    console.log(`${"═".repeat(60)}`);
+    const prevJobDir = fromJob ? path.join(OUTPUT_DIR, fromJob) : null;
+    const prevManifest = prevJobDir && fs.existsSync(path.join(prevJobDir, "manifest.json"))
+      ? JSON.parse(fs.readFileSync(path.join(prevJobDir, "manifest.json"), "utf-8"))
+      : null;
 
-    stepStart = Date.now();
+    if (prevManifest) {
+      console.log(`${"═".repeat(60)}`);
+      console.log(`⚡ CACHE HIT: Reusing previous job data`);
+      console.log(`${"═".repeat(60)}`);
 
-    // Run split and transcribe in parallel
-    const splitPromise = split(ingestResult.audioPath, jobDir, {
-      model: "htdemucs",
-      shifts: 1,
-    });
+      const cacheStart = Date.now();
 
-    const transcribePromise = transcribe(ingestResult.audioPath, {
-      language: "english",
-      speakerLabels: true,
-    });
+      // Reuse video and audio — use symlinks to save disk space
+      const prevVideo = path.join(prevJobDir, "source_video.mp4");
+      const prevAudioWav = path.join(prevJobDir, "source_audio.wav");
+      const prevAudioMp3 = path.join(prevJobDir, "source_audio.mp3");
+      if (fs.existsSync(prevVideo)) {
+        fs.symlinkSync(prevVideo, path.join(jobDir, "source_video.mp4"));
+      }
+      if (fs.existsSync(prevAudioWav)) {
+        fs.symlinkSync(prevAudioWav, path.join(jobDir, "source_audio.wav"));
+      } else if (fs.existsSync(prevAudioMp3)) {
+        fs.symlinkSync(prevAudioMp3, path.join(jobDir, "source_audio.mp3"));
+      }
 
-    // Transcribe finishes first
-    const transcribeResult = await transcribePromise;
-    timings.transcribe = (Date.now() - stepStart) / 1000;
+      // Build ingestResult from manifest
+      const audioFile = fs.existsSync(path.join(jobDir, "source_audio.wav"))
+        ? path.join(jobDir, "source_audio.wav")
+        : fs.existsSync(path.join(jobDir, "source_audio.mp3"))
+          ? path.join(jobDir, "source_audio.mp3") : null;
 
-    console.log(
-      `   ✅ Transcribed: ${transcribeResult.segments.length} segments`,
-    );
+      ingestResult = {
+        videoPath: fs.existsSync(path.join(jobDir, "source_video.mp4"))
+          ? path.join(jobDir, "source_video.mp4") : null,
+        audioPath: audioFile,
+        media: prevManifest.media || { duration: 0, width: 0, height: 0 },
+        source: prevManifest.source || { type: "cached", url: source },
+        title: prevManifest.source?.title || "Cached",
+      };
+      timings.ingest = 0;
 
-    // Merge close segments
-    const mergedSegments = mergeCloseSegments(transcribeResult.segments, {
-      maxGap: 0.5,
-      maxDuration: 12,
-    });
+      // Reuse vocals and background via symlinks
+      const prevVocals = path.join(prevJobDir, "vocals_original.mp3");
+      const prevBackground = path.join(prevJobDir, "background.mp3");
+      if (fs.existsSync(prevVocals)) {
+        fs.symlinkSync(prevVocals, path.join(jobDir, "vocals_original.mp3"));
+      }
+      if (fs.existsSync(prevBackground)) {
+        fs.symlinkSync(prevBackground, path.join(jobDir, "background.mp3"));
+      }
 
-    // Handle overlaps
-    const { segments: cleanSegments } = detectAndHandleOverlaps(
-      mergedSegments,
-      {
+      // Split is already done — create a resolved promise
+      splitPromise = Promise.resolve({
+        vocals: path.join(jobDir, "vocals_original.mp3"),
+        background: path.join(jobDir, "background.mp3"),
+        processingTime: 0,
+      });
+      timings.split = 0;
+
+      // Load transcription from previous job
+      const prevTranscription = path.join(prevJobDir, "transcription.json");
+      if (fs.existsSync(prevTranscription)) {
+        const txData = JSON.parse(fs.readFileSync(prevTranscription, "utf-8"));
+        cleanSegments = txData.segments;
+        transcribeResult = { segments: txData.segments, text: txData.text || "" };
+        fs.copyFileSync(prevTranscription, path.join(jobDir, "transcription.json"));
+        console.log(`   ✅ Loaded ${cleanSegments.length} segments from cache`);
+      } else {
+        throw new Error("Previous job missing transcription.json");
+      }
+      timings.transcribe = 0;
+
+      // Load restyled segments from previous job (if text restyle matches)
+      const prevRestyled = path.join(prevJobDir, "restyled.json");
+      const prevRestylePrompt = prevManifest.style?.customPrompt || null;
+      const currentRestylePrompt = derivedCustomPrompt || null;
+      const restyleMatches = prevRestylePrompt === currentRestylePrompt;
+
+      if (restyleMatches && fs.existsSync(prevRestyled)) {
+        const rsData = JSON.parse(fs.readFileSync(prevRestyled, "utf-8"));
+        restyledSegments = rsData.segments;
+        fs.copyFileSync(prevRestyled, path.join(jobDir, "restyled.json"));
+        console.log(`   ✅ Reused restyled text (same prompt)`);
+        timings.restyle = 0;
+      } else {
+        // Restyle prompt changed — need to re-run
+        console.log(`   🔄 Restyle prompt changed — re-running Gemini restyle`);
+        stepStart = Date.now();
+        const hasRestylePrompt = derivedCustomPrompt || (style !== "custom" && VOICE_STYLES[style]);
+
+        if (hasRestylePrompt) {
+          restyledSegments = await restyleTranscript(cleanSegments, {
+            style,
+            customPrompt: derivedCustomPrompt,
+            batchSize: 30,
+            concurrency: 5,
+          });
+        } else {
+          restyledSegments = cleanSegments.map((seg) => ({
+            ...seg,
+            restyledText: seg.text,
+          }));
+        }
+        timings.restyle = (Date.now() - stepStart) / 1000;
+
+        fs.writeFileSync(
+          path.join(jobDir, "restyled.json"),
+          JSON.stringify(
+            { style: styleConfig.name || "Custom", segments: restyledSegments, restyledAt: new Date().toISOString() },
+            null, 2,
+          ),
+        );
+      }
+
+      const cacheTime = ((Date.now() - cacheStart) / 1000).toFixed(1);
+      console.log(`   ⚡ Cache restore complete in ${cacheTime}s (saved ~40-60s)\n`);
+
+    } else {
+      // ═══════════════════════════════════════════════════════════════
+      // FULL PATH: Run all steps from scratch
+      // ═══════════════════════════════════════════════════════════════
+
+      // STEP 1: INGEST
+      console.log(`${"═".repeat(60)}`);
+      console.log(`📥 STEP 1: INGEST`);
+      console.log(`${"═".repeat(60)}`);
+
+      stepStart = Date.now();
+      ingestResult = await ingest(source, jobDir, {
+        start,
+        duration: clipDuration,
+      });
+      timings.ingest = (Date.now() - stepStart) / 1000;
+
+      console.log(
+        `   ✅ Ingested: ${formatDuration(ingestResult.media.duration)} video`,
+      );
+
+      // STEP 2 & 3: SPLIT + TRANSCRIBE (parallel)
+      console.log(`\n${"═".repeat(60)}`);
+      console.log(`⚡ STEP 2+3: SPLIT + TRANSCRIBE (parallel)`);
+      console.log(`${"═".repeat(60)}`);
+
+      stepStart = Date.now();
+
+      splitPromise = split(ingestResult.audioPath, jobDir, {
+        model: "htdemucs",
+        shifts: 1,
+      });
+
+      const transcribePromise = transcribe(ingestResult.audioPath, {
+        language: "english",
+        speakerLabels: true,
+      });
+
+      transcribeResult = await transcribePromise;
+      timings.transcribe = (Date.now() - stepStart) / 1000;
+
+      console.log(
+        `   ✅ Transcribed: ${transcribeResult.segments.length} segments`,
+      );
+
+      const mergedSegments = mergeCloseSegments(transcribeResult.segments, {
+        maxGap: 0.5,
+        maxDuration: 12,
+      });
+
+      const overlapResult = detectAndHandleOverlaps(mergedSegments, {
         strategy: "truncate",
         minOverlap: 0.1,
-      },
-    );
-
-    console.log(`   📝 Clean segments: ${cleanSegments.length}`);
-
-    // Save transcription
-    fs.writeFileSync(
-      path.join(jobDir, "transcription.json"),
-      JSON.stringify(
-        {
-          text: transcribeResult.text,
-          segments: cleanSegments,
-          transcribedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      ),
-    );
-
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 4: RESTYLE - Gemini text transformation
-    // ═══════════════════════════════════════════════════════════════
-    console.log(`\n${"═".repeat(60)}`);
-    console.log(`🎨 STEP 4: RESTYLE`);
-    console.log(`${"═".repeat(60)}`);
-
-    stepStart = Date.now();
-
-    // Skip restyle if no prompt provided (style=custom with no customPrompt/derivedPrompt)
-    const hasRestylePrompt = derivedCustomPrompt || (style !== "custom" && VOICE_STYLES[style]);
-    let restyledSegments;
-
-    if (hasRestylePrompt) {
-      restyledSegments = await restyleTranscript(cleanSegments, {
-        style,
-        customPrompt: derivedCustomPrompt,
-        batchSize: 30,
-        concurrency: 5,
       });
-    } else {
-      console.log(`\n   ⏭️ No text restyle prompt — keeping original words\n`);
-      restyledSegments = cleanSegments.map((seg) => ({
-        ...seg,
-        restyledText: seg.text,
-      }));
+      cleanSegments = overlapResult.segments;
+
+      console.log(`   📝 Clean segments: ${cleanSegments.length}`);
+
+      fs.writeFileSync(
+        path.join(jobDir, "transcription.json"),
+        JSON.stringify(
+          { text: transcribeResult.text, segments: cleanSegments, transcribedAt: new Date().toISOString() },
+          null, 2,
+        ),
+      );
+
+      // STEP 4: RESTYLE
+      console.log(`\n${"═".repeat(60)}`);
+      console.log(`🎨 STEP 4: RESTYLE`);
+      console.log(`${"═".repeat(60)}`);
+
+      stepStart = Date.now();
+
+      const hasRestylePrompt = derivedCustomPrompt || (style !== "custom" && VOICE_STYLES[style]);
+
+      if (hasRestylePrompt) {
+        restyledSegments = await restyleTranscript(cleanSegments, {
+          style,
+          customPrompt: derivedCustomPrompt,
+          batchSize: 30,
+          concurrency: 5,
+        });
+      } else {
+        console.log(`\n   ⏭️ No text restyle prompt — keeping original words\n`);
+        restyledSegments = cleanSegments.map((seg) => ({
+          ...seg,
+          restyledText: seg.text,
+        }));
+      }
+
+      timings.restyle = (Date.now() - stepStart) / 1000;
+
+      fs.writeFileSync(
+        path.join(jobDir, "restyled.json"),
+        JSON.stringify(
+          { style: styleConfig.name || "Custom", segments: restyledSegments, restyledAt: new Date().toISOString() },
+          null, 2,
+        ),
+      );
     }
-
-    timings.restyle = (Date.now() - stepStart) / 1000;
-
-    // Save restyled text
-    fs.writeFileSync(
-      path.join(jobDir, "restyled.json"),
-      JSON.stringify(
-        {
-          style: styleConfig.name || "Custom",
-          segments: restyledSegments,
-          restyledAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      ),
-    );
 
     // ═══════════════════════════════════════════════════════════════
     // STEP 5: TTS - Generate restyled voice audio
@@ -330,6 +484,12 @@ Return ONLY the JSON object, no markdown, no explanation.`,
     const validSegments = restyledSegments.filter(
       (s) => s && s.restyledText && s.restyledText.trim().length > 0,
     );
+
+    const ttsConcurrency = validSegments.length <= 3 ? 5
+      : validSegments.length <= 10 ? 15
+      : validSegments.length <= 25 ? 30
+      : 40;
+    console.log(`   ⚡ TTS concurrency: ${ttsConcurrency} (${validSegments.length} segments)`);
 
     // Gender is inferred from voice prompt (derivedGender) — no Gemini call needed
     const detectedGender = derivedGender;
@@ -406,7 +566,7 @@ Return ONLY the JSON object, no markdown, no explanation.`,
             : null,
           styleInstruction: styleConfig.styleInstruction || null,
           language: QWEN_LANGUAGES[ttsLanguage] || "auto",
-          concurrency: 10,
+          concurrency: ttsConcurrency,
         });
 
         ttsResult = {
@@ -424,7 +584,7 @@ Return ONLY the JSON object, no markdown, no explanation.`,
           voiceDescription: styleConfig.voiceDescription || "A clear, natural speaking voice",
           styleInstruction: styleConfig.styleInstruction || null,
           language: QWEN_LANGUAGES[ttsLanguage] || "auto",
-          concurrency: 10,
+          concurrency: ttsConcurrency,
         });
 
         ttsResult = {
@@ -448,47 +608,51 @@ Return ONLY the JSON object, no markdown, no explanation.`,
           ? `A voice that matches this personality: ${customPrompt}`
           : styleConfig.voiceDescription);
 
-      // ── Expand short prompts into rich Qwen voice descriptions ──
-      // Qwen3-TTS responds much better to detailed descriptions with
-      // specific vocal qualities rather than short labels like "Spanish guy"
-      const expandVoiceDescription = (desc, gender) => {
+      // ── Build voice_description for Qwen ──
+      // This is the primary voice identity signal. Must be concrete audio traits.
+      // Gemini's voiceExpansion is purpose-built for this, so it takes priority.
+      const buildVoiceDescription = (desc, gender) => {
         if (!desc) return null;
-        // If the user already wrote a detailed description (50+ chars), use it as-is
+
+        // Gemini expansion is already optimized for Qwen's voice_description field
+        if (geminiVoiceExpansion) return geminiVoiceExpansion;
+
+        // User wrote a detailed description — use as-is
         if (desc.length >= 50) return desc;
 
+        // Fallback: quick template for short prompts
         const g = gender || "male";
         const genderWord = g === "female" ? "woman" : "man";
         const pitchHint = g === "female"
-          ? "with a warm, mid-to-high pitched voice"
-          : "with a clear, mid-to-low pitched voice";
+          ? "mid-to-high pitched"
+          : "mid-to-low pitched";
 
-        // Detect language for accent hint
-        const langAccents = {
-          spanish: "a native Spanish accent, rolling Rs",
-          french: "a smooth native French accent",
-          german: "a crisp native German accent",
-          japanese: "a native Japanese speaker's rhythm and intonation",
-          chinese: "a native Mandarin Chinese speaker's tones and rhythm",
-          korean: "a native Korean speaker's rhythm and intonation",
-          portuguese: "a warm native Brazilian Portuguese accent",
-          italian: "a melodic native Italian accent",
-          russian: "a deep native Russian accent",
-          arabic: "a native Arabic speaker's intonation",
-        };
-        const lower = desc.toLowerCase();
-        const accentMatch = Object.entries(langAccents).find(([k]) => lower.includes(k));
-        const accentHint = accentMatch ? `, ${accentMatch[1]}` : "";
-
-        return `A ${genderWord} ${pitchHint}${accentHint}. ${desc}. Speaks clearly and naturally with a conversational, confident tone and expressive delivery.`;
+        return `A ${genderWord} with a ${pitchHint}, expressive voice. ${desc}. Speaks with clear, natural, confident delivery.`;
       };
 
-      const voiceDesc = expandVoiceDescription(rawVoiceDesc, derivedGender);
+      const voiceDesc = buildVoiceDescription(rawVoiceDesc, derivedGender);
 
-      // Build a style instruction that reinforces the prompt
-      const effectiveStyleInstruction =
-        voicePrompt
-          ? `Speak exactly as described: ${voicePrompt}. Be expressive, natural, and fully committed to this voice character.`
-          : styleConfig.styleInstruction || null;
+      // ── Build style_instruction for Qwen ──
+      // This is a SEPARATE control channel from voice_description.
+      // voice_description = WHO the voice is (timbre, accent, pitch)
+      // style_instruction = HOW they speak (emotion, energy, delivery style)
+      // Using both together produces the strongest results.
+      const buildStyleInstruction = () => {
+        if (!voicePrompt) return styleConfig.styleInstruction || null;
+
+        const parts = [`Speak as: ${voicePrompt}.`];
+
+        if (geminiVoiceExpansion) {
+          // Extract delivery/energy cues from the expansion to reinforce via style channel
+          parts.push(`Embody these qualities fully: ${geminiVoiceExpansion.substring(0, 250)}.`);
+        }
+
+        parts.push("Commit 100% to this character. Never break character. Never sound generic or neutral.");
+
+        return parts.join(" ");
+      };
+
+      const effectiveStyleInstruction = buildStyleInstruction();
 
       if (voiceDesc) {
         console.log(
@@ -545,7 +709,7 @@ Return ONLY the JSON object, no markdown, no explanation.`,
         voiceDescription: voiceDesc || "A clear, natural, expressive speaking voice with confident delivery",
         styleInstruction: effectiveStyleInstruction,
         language: QWEN_LANGUAGES[ttsLanguage] || "auto",
-        concurrency: 10,
+        concurrency: ttsConcurrency,
         speakerVoiceMap,
       });
 
@@ -591,7 +755,7 @@ Return ONLY the JSON object, no markdown, no explanation.`,
           jobDir,
           {
             language: "en",
-            concurrency: 10,
+            concurrency: ttsConcurrency,
             mergeOverlaps: false,
             adjustSpeed: true,
             skipExtreme: true,
@@ -717,8 +881,16 @@ Return ONLY the JSON object, no markdown, no explanation.`,
     }
 
     // Render video with mixed audio
+    // For re-remix (cached), skip video render — frontend uses separate audio tracks
     let videoOutputPath = null;
-    if (ingestResult.videoPath && fs.existsSync(ingestResult.videoPath)) {
+    if (fromJob && prevManifest) {
+      const prevVideo = path.join(prevJobDir, "dubbed_video.mp4");
+      if (fs.existsSync(prevVideo)) {
+        fs.symlinkSync(prevVideo, path.join(jobDir, "dubbed_video.mp4"));
+        videoOutputPath = path.join(jobDir, "dubbed_video.mp4");
+        console.log(`   ⚡ Reusing previous video render`);
+      }
+    } else if (ingestResult.videoPath && fs.existsSync(ingestResult.videoPath)) {
       console.log(`   🎬 Rendering video...`);
       const dubbedVideoPath = path.join(jobDir, "dubbed_video.mp4");
       const mixedAudioPath = mixedResult.outputPath || mixedPath;
@@ -750,10 +922,11 @@ Return ONLY the JSON object, no markdown, no explanation.`,
       jobId,
       type: "remix",
       completedAt: new Date().toISOString(),
+      fromJob: fromJob || null,
       style: {
         id: style,
         name: styleConfig.name || "Custom",
-        customPrompt: customPrompt || null,
+        customPrompt: derivedCustomPrompt || customPrompt || null,
         voicePrompt: voicePrompt || styleConfig.voiceDescription || null,
       },
       source: {
@@ -882,6 +1055,12 @@ if (require.main === module) {
     }
   }
 
+  let fromJob = null;
+  if (args.includes("--from-job")) {
+    const idx = args.indexOf("--from-job");
+    fromJob = args[idx + 1];
+  }
+
   let startTime = null;
   if (args.includes("--start")) {
     const idx = args.indexOf("--start");
@@ -902,6 +1081,7 @@ if (require.main === module) {
       a !== voicePrompt &&
       a !== voiceOverride &&
       a !== voiceFilePath &&
+      a !== fromJob &&
       a !== startTime?.toString() &&
       a !== clipDuration?.toString(),
   );
@@ -932,6 +1112,7 @@ Flags:
   --voice-file PATH      Custom voice sample for cloning
   --premium              Use ElevenLabs premium TTS (legacy)
   --voice NAME           Override voice selection (legacy)
+  --from-job DIR         ⚡ Reuse cached data from a previous remix job (skips ingest/split/transcribe)
   --start SECONDS        Start time for clipping
   --duration SECONDS     Duration for clipping
 
@@ -980,6 +1161,7 @@ Examples:
     start: startTime,
     clipDuration,
     voiceFilePath,
+    fromJob,
   })
     .then((result) => {
       process.exit(result.success ? 0 : 1);
